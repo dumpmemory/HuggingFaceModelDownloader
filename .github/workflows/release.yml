@@ -11,6 +11,11 @@ jobs:
   build:
     name: Build ${{ matrix.os }}-${{ matrix.arch }}
     runs-on: ubuntu-latest
+    # v3.0.4 assets were built locally and uploaded to the draft release
+    # before publish (preserves the Windows goversioninfo resource stamp
+    # that CI can't reproduce without the goversioninfo tool). The
+    # condition is tag-specific and will be removed after v3.0.4 ships.
+    if: github.ref_name != 'v3.0.4'
     strategy:
       matrix:
         include:
