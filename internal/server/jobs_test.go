@@ -22,30 +22,18 @@ func TestJobManager_CreateJob(t *testing.T) {
 
 	mgr := NewJobManager(cfg, hub)
 
-	// Each CreateJob here spawns a runJob goroutine that will try to
-	// download from a non-existent HF repo and create subdirectories
-	// under testCacheDir before failing. Cancel every job and give the
-	// goroutines a moment to unwind before t.TempDir runs its own
-	// RemoveAll — otherwise the cleanup races a still-in-flight mkdir
-	// and fails with "directory not empty".
+	// Each CreateJob here spawns a runJob goroutine that tries to download
+	// from a non-existent HF repo. The downloader creates subdirectories
+	// under testCacheDir via EnsureDirs before any HTTP call returns, so
+	// a naive t.TempDir cleanup races those mkdirs and fails with
+	// "directory not empty". Cancel all jobs then block on WaitAll until
+	// every runJob goroutine has actually exited its stack frame — not
+	// just until Status flipped to Cancelled.
 	t.Cleanup(func() {
 		for _, j := range mgr.ListJobs() {
 			mgr.CancelJob(j.ID)
 		}
-		// Drain any background goroutines before t.TempDir's cleanup runs.
-		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) {
-			active := 0
-			for _, j := range mgr.ListJobs() {
-				if j.Status == JobStatusQueued || j.Status == JobStatusRunning {
-					active++
-				}
-			}
-			if active == 0 {
-				break
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
+		mgr.WaitAll(5 * time.Second)
 		os.RemoveAll(testCacheDir)
 	})
 

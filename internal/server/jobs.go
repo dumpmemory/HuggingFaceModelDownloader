@@ -72,6 +72,12 @@ type JobManager struct {
 	listenerMu  sync.RWMutex
 	wsHub       *WSHub
 	wsCoalescer *jobCoalescer
+	// runWG tracks in-flight runJob goroutines so shutdown paths (and
+	// tests) can wait for every download to actually unwind — not just
+	// for Status to flip to Cancelled. Without this a t.TempDir cleanup
+	// can race a still-in-flight mkdir inside the downloader and fail
+	// with "directory not empty".
+	runWG sync.WaitGroup
 }
 
 // wsBroadcastMinGap is the minimum interval between consecutive WebSocket
@@ -183,6 +189,7 @@ func (m *JobManager) CreateJob(req DownloadRequest) (*Job, bool, error) {
 	m.mu.Unlock()
 
 	// Start the job
+	m.runWG.Add(1)
 	go m.runJob(job)
 
 	return snapshot, false, nil
@@ -294,6 +301,7 @@ func (m *JobManager) ResumeJob(id string) bool {
 	m.notifyListeners(snapshot)
 
 	// Restart the job - already downloaded files will be skipped by the downloader
+	m.runWG.Add(1)
 	go m.runJob(job)
 
 	return true
@@ -316,6 +324,25 @@ func (m *JobManager) DeleteJob(id string) bool {
 
 	delete(m.jobs, id)
 	return true
+}
+
+// WaitAll blocks until every in-flight runJob goroutine has returned or
+// until timeout elapses. Returns true if all goroutines exited cleanly,
+// false on timeout. Primarily for tests and graceful shutdown — lets
+// callers observe actual goroutine exit rather than just Status==Cancelled,
+// which is set before the downloader's filesystem operations fully unwind.
+func (m *JobManager) WaitAll(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		m.runWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // DismissJobResult distinguishes the three possible outcomes of a dismiss
@@ -412,6 +439,8 @@ func (m *JobManager) notifyListeners(snapshot *Job) {
 
 // runJob executes the download job.
 func (m *JobManager) runJob(job *Job) {
+	defer m.runWG.Done()
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Increment generation and store our generation number
