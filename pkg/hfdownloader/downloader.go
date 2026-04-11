@@ -436,13 +436,44 @@ LOOP:
 }
 
 // downloadSingle downloads a file in a single request.
+//
+// Resume behavior: if a .part file already exists from a previous interrupted
+// run, its bytes are preserved and the HTTP request uses a Range header to
+// fetch only the remaining bytes. If the server ignores the Range header and
+// responds with 200 (full body), the .part file is truncated and the download
+// restarts from zero.
 func downloadSingle(ctx context.Context, httpc *http.Client, token string, job Job, cfg Settings, it PlanItem, dst string, emit func(ProgressEvent)) error {
 	tmp := dst + ".part"
-	out, err := os.Create(tmp)
+	out, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
+
+	fi, err := out.Stat()
+	if err != nil {
+		return err
+	}
+	pos := fi.Size()
+
+	// If the partial is already exactly the right size, finalize without network.
+	if it.Size > 0 && pos == it.Size {
+		out.Close()
+		return os.Rename(tmp, dst)
+	}
+	// If the partial is larger than expected (stale/corrupt), start over.
+	if it.Size > 0 && pos > it.Size {
+		if err := out.Truncate(0); err != nil {
+			return err
+		}
+		pos = 0
+	}
+	if _, err := out.Seek(pos, io.SeekStart); err != nil {
+		return err
+	}
+	if pos > 0 {
+		emit(ProgressEvent{Event: "file_progress", Path: it.RelativePath, Downloaded: pos, Total: it.Size})
+	}
 
 	retry := newRetry(cfg)
 	var lastErr error
@@ -456,17 +487,37 @@ func downloadSingle(ctx context.Context, httpc *http.Client, token string, job J
 
 		req, _ := http.NewRequestWithContext(ctx, "GET", it.URL, nil)
 		addAuth(req, token)
+		if pos > 0 {
+			if it.Size > 0 {
+				req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", pos, it.Size-1))
+			} else {
+				req.Header.Set("Range", fmt.Sprintf("bytes=%d-", pos))
+			}
+		}
 
 		resp, err := httpc.Do(req)
 		if err != nil {
 			lastErr = err
 		} else {
+			// If we asked for a range but the server returned the whole body,
+			// throw away any existing partial bytes and start fresh.
+			if pos > 0 && resp.StatusCode == http.StatusOK {
+				if err := out.Truncate(0); err != nil {
+					resp.Body.Close()
+					return err
+				}
+				if _, err := out.Seek(0, io.SeekStart); err != nil {
+					resp.Body.Close()
+					return err
+				}
+				pos = 0
+			}
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 				lastErr = fmt.Errorf("bad status: %s", resp.Status)
 				resp.Body.Close()
 			} else {
-				// Use progress reader to emit periodic updates
 				pr := newProgressReader(resp.Body, it.Size, it.RelativePath, emit)
+				pr.downloaded = pos // emitted progress reflects cumulative bytes
 				_, cerr := io.Copy(out, pr)
 				resp.Body.Close()
 				if cerr == nil {
@@ -474,6 +525,11 @@ func downloadSingle(ctx context.Context, httpc *http.Client, token string, job J
 					return os.Rename(tmp, dst)
 				}
 				lastErr = cerr
+				// Update pos to current file position so the next retry issues
+				// a Range request for the remaining bytes instead of duplicating.
+				if cur, serr := out.Seek(0, io.SeekCurrent); serr == nil {
+					pos = cur
+				}
 			}
 		}
 
@@ -538,9 +594,49 @@ func downloadMultipart(ctx context.Context, httpc *http.Client, token string, jo
 		go func() {
 			defer wg.Done()
 			tmp := tmpParts[i]
+			expected := end - start + 1
 
-			// Resume: skip if already correct size
-			if fi, err := os.Stat(tmp); err == nil && fi.Size() == (end-start+1) {
+			// Open or create the part file without truncating; we may be
+			// resuming from a previous interrupted run.
+			out, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE, 0o644)
+			if err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
+			}
+			defer out.Close()
+
+			fi, err := out.Stat()
+			if err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
+			}
+			pos := fi.Size()
+			// Already fully downloaded.
+			if pos == expected {
+				return
+			}
+			// Oversize (stale/corrupt) — reset.
+			if pos > expected {
+				if err := out.Truncate(0); err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+					return
+				}
+				pos = 0
+			}
+			if _, err := out.Seek(pos, io.SeekStart); err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
 				return
 			}
 
@@ -556,7 +652,7 @@ func downloadMultipart(ctx context.Context, httpc *http.Client, token string, jo
 
 				rq, _ := http.NewRequestWithContext(ctx, "GET", it.URL, nil)
 				addAuth(rq, token)
-				rq.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+				rq.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start+pos, end))
 
 				rs, err := httpc.Do(rq)
 				if err != nil {
@@ -565,18 +661,17 @@ func downloadMultipart(ctx context.Context, httpc *http.Client, token string, jo
 					lastErr = fmt.Errorf("range not supported (status %s)", rs.Status)
 					rs.Body.Close()
 				} else {
-					out, err := os.Create(tmp)
-					if err != nil {
-						lastErr = err
-						rs.Body.Close()
-					} else {
-						_, lastErr = io.Copy(out, rs.Body)
-						out.Close()
+					_, cerr := io.Copy(out, rs.Body)
 					rs.Body.Close()
-					if lastErr == nil {
+					if cerr == nil {
 						return
 					}
-				}
+					lastErr = cerr
+					// Advance pos by what we actually wrote so the next retry
+					// Range request picks up from the correct offset.
+					if cur, serr := out.Seek(0, io.SeekCurrent); serr == nil {
+						pos = cur
+					}
 				}
 
 				if attempt < cfg.Retries {
@@ -594,13 +689,22 @@ func downloadMultipart(ctx context.Context, httpc *http.Client, token string, jo
 		}()
 	}
 
-	// Emit periodic progress
+	// Emit periodic progress while parts download. The ticker is stopped
+	// cleanly after wg.Wait() so it cannot observe mid-assembly state (parts
+	// being deleted) and emit a bogus 0-byte progress event — the bug behind
+	// the "progress jumps 2.4% ↔ 2.5% for hours" symptom in github #75.
+	tickerDone := make(chan struct{})
+	var tickerWG sync.WaitGroup
+	tickerWG.Add(1)
 	go func() {
+		defer tickerWG.Done()
 		t := time.NewTicker(200 * time.Millisecond) // More frequent updates for responsive UI
 		defer t.Stop()
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-tickerDone:
 				return
 			case <-t.C:
 				var downloaded int64
@@ -616,11 +720,22 @@ func downloadMultipart(ctx context.Context, httpc *http.Client, token string, jo
 
 	wg.Wait()
 
+	// Stop the progress ticker and wait for it to exit before touching the
+	// part files. Any in-flight tick will finish and emit one final event
+	// while parts are still on disk at their real sizes.
+	close(tickerDone)
+	tickerWG.Wait()
+
 	select {
 	case e := <-errCh:
 		return e
 	default:
 	}
+
+	// Emit one explicit full-progress reading so the caller's last observed
+	// file_progress value is the full byte count, regardless of when the
+	// ticker happened to last fire.
+	emit(ProgressEvent{Event: "file_progress", Path: it.RelativePath, Downloaded: it.Size, Total: it.Size})
 
 	// Assemble parts
 	out, err := os.Create(dst + ".part")
