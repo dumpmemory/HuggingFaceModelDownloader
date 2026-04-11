@@ -97,10 +97,18 @@ bash <(curl -sSL https://g.bodaay.io/hfd) serve
 bash <(curl -sSL https://g.bodaay.io/hfd) serve --auth-user admin --auth-pass secret
 ```
 
-**Like it? Install permanently:**
+**Like it? Install permanently (no sudo):**
 
 ```bash
 bash <(curl -sSL https://g.bodaay.io/hfd) install
+```
+
+By default this installs to `~/.local/bin` (or `~/bin` if that's already on
+your PATH) so no sudo prompt is needed. Pass an explicit path to override:
+
+```bash
+# System-wide install (may prompt for sudo)
+bash <(curl -sSL https://g.bodaay.io/hfd) install /usr/local/bin
 ```
 
 Now use directly:
@@ -376,7 +384,13 @@ proxy:
 bash <(curl -sSL https://g.bodaay.io/hfd) install
 ```
 
-That's it. Works on Linux, macOS, and WSL.
+That's it. Works on Linux, macOS, and WSL. Installs to `~/.local/bin` by
+default — no sudo required. Pass an explicit path to install somewhere else:
+
+```bash
+bash <(curl -sSL https://g.bodaay.io/hfd) install /usr/local/bin   # system-wide
+bash <(curl -sSL https://g.bodaay.io/hfd) install ~/bin            # custom
+```
 
 **Or run without installing:**
 
