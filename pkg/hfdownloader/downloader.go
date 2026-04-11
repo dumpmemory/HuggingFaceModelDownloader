@@ -726,6 +726,18 @@ func downloadMultipart(ctx context.Context, httpc *http.Client, token string, jo
 	close(tickerDone)
 	tickerWG.Wait()
 
+	// If the context was cancelled while parts were running (pause / abort /
+	// timeout), return the cancellation error immediately. Part goroutines
+	// that exit via their ctx-aware retry/sleep path do NOT push to errCh,
+	// so we cannot rely on the errCh drain to catch this — we must check
+	// ctx.Err() explicitly. Returning here is critical: it prevents the
+	// bogus "downloaded == total" progress emit below AND stops the
+	// assembly loop from stitching an incomplete part set into a corrupt
+	// final file and deleting the partial bytes the next resume needs.
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
 	select {
 	case e := <-errCh:
 		return e

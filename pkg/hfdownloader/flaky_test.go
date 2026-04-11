@@ -161,6 +161,179 @@ func TestDownloadMultipart_ResumesAfterFlakyConnection(t *testing.T) {
 	}
 }
 
+// slowRangeServer serves Range requests at a bounded byte rate so the test
+// can cancel context mid-stream deterministically. It streams bytes in small
+// chunks with a short sleep between chunks.
+func slowRangeServer(t *testing.T, full []byte) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+			w.Header().Set("Accept-Ranges", "bytes")
+			return
+		}
+		rng := r.Header.Get("Range")
+		var start, end int64
+		if _, err := fmt.Sscanf(rng, "bytes=%d-%d", &start, &end); err != nil || end >= int64(len(full)) {
+			http.Error(w, "bad range", http.StatusBadRequest)
+			return
+		}
+		content := full[start : end+1]
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(full)))
+		w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+		w.WriteHeader(http.StatusPartialContent)
+
+		flusher, _ := w.(http.Flusher)
+		const chunk = 512
+		for i := 0; i < len(content); i += chunk {
+			select {
+			case <-r.Context().Done():
+				return
+			default:
+			}
+			j := i + chunk
+			if j > len(content) {
+				j = len(content)
+			}
+			if _, err := w.Write(content[i:j]); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}))
+}
+
+// TestDownloadMultipart_CancelMidStreamDoesNotClaim100 is a regression test
+// for the UI bug: when a user paused mid-download, downloadMultipart used to
+// emit a "file_progress downloaded==total" event via its tail path even
+// though the parts were incomplete, then ran assembly over the partial set
+// and destroyed the part files. On a subsequent resume the UI had already
+// snapped to 100%, assembly had corrupted/removed the partial bytes, and
+// the real resume appeared to start over from zero.
+//
+// This test cancels the context mid-download and asserts:
+//   - downloadMultipart returns a context error (not nil success)
+//   - no file_progress event ever reports downloaded == total
+//   - at least one part-XX file survives on disk after return, proving the
+//     partial bytes were not destroyed by an erroneous assembly pass
+func TestDownloadMultipart_CancelMidStreamDoesNotClaim100(t *testing.T) {
+	tmpDir := t.TempDir()
+	const totalSize = 200_000
+	full := make([]byte, totalSize)
+	for i := range full {
+		full[i] = byte(i % 251)
+	}
+	const nParts = 4
+
+	dst := filepath.Join(tmpDir, "blobs", "tmp-cancel")
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := slowRangeServer(t, full)
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var (
+		mu             sync.Mutex
+		saw100         bool
+		maxObserved    int64
+		lastDownloaded int64
+	)
+	emit := func(ev ProgressEvent) {
+		if ev.Event != "file_progress" || ev.Path != "cancel.bin" {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		lastDownloaded = ev.Downloaded
+		if ev.Downloaded > maxObserved {
+			maxObserved = ev.Downloaded
+		}
+		if ev.Downloaded == ev.Total && ev.Total == int64(totalSize) {
+			saw100 = true
+		}
+	}
+
+	// Cancel once we've made real forward progress.
+	go func() {
+		for {
+			mu.Lock()
+			p := maxObserved
+			mu.Unlock()
+			if p > 0 && p < totalSize/2 {
+				cancel()
+				return
+			}
+			if p >= totalSize/2 {
+				// Download is racing ahead of us; cancel anyway to
+				// still exercise the early-exit path.
+				cancel()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	it := PlanItem{
+		RelativePath: "cancel.bin",
+		URL:          srv.URL + "/cancel.bin",
+		Size:         int64(len(full)),
+		AcceptRanges: true,
+	}
+	// Use the default-ish retry count: with Retries>0, a goroutine that
+	// gets a context error during its request enters the retry branch and
+	// returns silently via sleepCtx without pushing to errCh — exactly the
+	// path that triggered the regression in production.
+	cfg := Settings{
+		Concurrency:    nParts,
+		Retries:        4,
+		BackoffInitial: "50ms",
+		BackoffMax:     "100ms",
+	}
+
+	err := downloadMultipart(ctx, srv.Client(), "", Job{Repo: "o/r"}, cfg, it, dst, emit)
+	if err == nil {
+		t.Fatal("downloadMultipart succeeded despite cancellation — expected a context error")
+	}
+
+	mu.Lock()
+	got100 := saw100
+	lastSeen := lastDownloaded
+	mu.Unlock()
+
+	if got100 {
+		t.Errorf("observed a 100%% file_progress event on cancel (last downloaded=%d, total=%d)",
+			lastSeen, totalSize)
+	}
+
+	// At least one part file should survive on disk — assembly must not
+	// have run and deleted them.
+	survived := 0
+	for i := 0; i < nParts; i++ {
+		p := fmt.Sprintf("%s.part-%02d", dst, i)
+		if fi, err := os.Stat(p); err == nil && fi.Size() > 0 {
+			survived++
+		}
+	}
+	if survived == 0 {
+		// It is valid for zero part files to exist if the cancel landed
+		// before any body bytes were written, but we selected the cancel
+		// point after the first progress event, so at least one part
+		// should have committed bytes.
+		t.Errorf("no part-NN files survived after cancel; assembly may have run and deleted them")
+	}
+
+	// The assembled final file must NOT exist.
+	if _, err := os.Stat(dst); err == nil {
+		t.Error("final dst file exists after cancellation; should have been left alone")
+	}
+}
+
 // TestDownloadMultipart_ProgressMonotonic captures every file_progress event
 // emitted during a flaky download and asserts that the reported downloaded
 // byte count never regresses — i.e. the UI never jumps backwards. This is
