@@ -332,6 +332,30 @@ func (s *Server) handleResumeJob(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleDismissJob permanently removes a finished job from the list so it
+// doesn't reappear on page refresh (github issue #68 secondary ask). Only
+// jobs in terminal states (completed, failed, cancelled, paused) can be
+// dismissed — active downloads must be cancelled first.
+func (s *Server) handleDismissJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "Missing job ID", "")
+		return
+	}
+
+	switch res, _ := s.jobs.DismissJobResult(id); res {
+	case DismissJobOK:
+		writeJSON(w, http.StatusOK, SuccessResponse{
+			Success: true,
+			Message: "Job dismissed",
+		})
+	case DismissJobStillActive:
+		writeError(w, http.StatusConflict, "Cannot dismiss an active job; cancel it first", "")
+	default:
+		writeError(w, http.StatusNotFound, "Job not found", "")
+	}
+}
+
 // handleGetSettings returns current settings.
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	// Don't expose full token, just indicate if set

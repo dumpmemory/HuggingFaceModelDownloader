@@ -1005,11 +1005,17 @@
     }
   };
 
-  // Dismiss (remove from view) a completed/failed/cancelled job
-  window.dismissJob = function(jobId) {
-    state.jobs.delete(jobId);
-    renderJobs();
-    updateJobsBadge();
+  // Dismiss (permanently remove) a completed/failed/cancelled/paused job.
+  // We call the server so the dismissal survives a page refresh (github #68).
+  window.dismissJob = async function(jobId) {
+    try {
+      await api('POST', `/jobs/${jobId}/dismiss`);
+      state.jobs.delete(jobId);
+      renderJobs();
+      updateJobsBadge();
+    } catch (e) {
+      showToast(`Failed to dismiss: ${e.message}`, 'error');
+    }
   };
 
   // =========================================
