@@ -485,12 +485,21 @@ Full documentation: [docs/CLI.md](docs/CLI.md) • [docs/API.md](docs/API.md) �
 | **Full Proxy Support** | HTTP, SOCKS5, authentication, CIDR bypass |
 | **Manifest Tracking** | `hfd.yaml` records what/when/how for every download |
 
-### Upgrading from v2.x
+### Getting real files in a directory you pick
 
-v3.0 uses HF cache by default. For v2.x behavior:
+By default v3 downloads into the HuggingFace cache (`~/.cache/huggingface/hub/...`)
+and creates a human-readable symlink view next to it. If you prefer plain
+files at a path of your choice — like `huggingface-cli download --local-dir` —
+use `--local-dir`:
 
 ```bash
-hfdownloader download owner/repo --legacy -o ./my-models
+hfdownloader download owner/repo --local-dir ./my-model
+```
+
+The v2.x-style `--legacy -o` form does the same thing and is kept forever:
+
+```bash
+hfdownloader download owner/repo --legacy -o ./my-model
 ```
 
 ---
