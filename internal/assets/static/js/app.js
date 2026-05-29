@@ -777,6 +777,29 @@
     // Preview buttons
     $('#previewModelBtn')?.addEventListener('click', () => previewDownload('model'));
     $('#previewDatasetBtn')?.addEventListener('click', () => previewDownload('dataset'));
+
+    // Show the server's storage mode (set at startup, read-only)
+    loadStorageModeBadge();
+  }
+
+  async function loadStorageModeBadge() {
+    const badge = $('#storageModeBadge');
+    if (!badge) return;
+    try {
+      const s = await api('GET', '/settings');
+      if (s.storageMode === 'local') {
+        badge.textContent = `Storage: local files → ${s.localDir}`;
+        badge.title = 'Server started with --local-dir: downloads are saved as real files (not HF cache). They will not appear in the Cache browser.';
+        badge.classList.add('storage-mode-local');
+      } else {
+        badge.textContent = `Storage: HF cache → ${s.cacheDir}`;
+        badge.title = 'Downloads use the HuggingFace cache layout. Start the server with --local-dir to save real files instead.';
+        badge.classList.remove('storage-mode-local');
+      }
+      badge.hidden = false;
+    } catch (e) {
+      badge.hidden = true;
+    }
   }
 
   async function startDownload(type) {
