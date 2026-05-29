@@ -68,6 +68,16 @@ type Job struct {
 	// Credits: Feature suggested by jeroenkroese (#41)
 	Excludes []string
 
+	// ExactMatch controls how Filters are matched. When false (the default),
+	// each filter is matched as a case-insensitive substring (see Filters).
+	// When true, a filter matches only when it equals a whole delimiter-bounded
+	// segment of the file name (segments are split on '-', '.', and spaces;
+	// underscores stay within a segment). This lets a filter like "q6_k" select
+	// "model-Q6_K.gguf" without also matching "model-UD-Q6_K_XL.gguf".
+	//
+	// Excludes are always matched as substrings, regardless of this setting.
+	ExactMatch bool
+
 	// AppendFilterSubdir puts each filter's matched files in a subdirectory
 	// named after the filter. Useful for organizing multiple quantizations.
 	//

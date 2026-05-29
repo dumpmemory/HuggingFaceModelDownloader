@@ -178,6 +178,12 @@
                 <label for="modelExclude">Exclude</label>
                 <input type="text" id="modelExclude" placeholder=".md, fp16">
               </div>
+              <div class="form-group">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="modelExact">
+                  <span>Exact match (e.g. <code>Q6_K</code> won't also match <code>Q6_K_XL</code>)</span>
+                </label>
+              </div>
               <div class="form-actions">
                 <button type="button" class="btn btn-secondary" id="previewModelBtn">Preview</button>
                 <button type="submit" class="btn btn-primary">Download</button>
@@ -212,6 +218,12 @@
               <div class="form-group">
                 <label for="datasetExclude">Exclude</label>
                 <input type="text" id="datasetExclude" placeholder=".md, raw">
+              </div>
+              <div class="form-group">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="datasetExact">
+                  <span>Exact match (filter must equal a whole name segment)</span>
+                </label>
               </div>
               <div class="form-actions">
                 <button type="button" class="btn btn-secondary" id="previewDatasetBtn">Preview</button>
