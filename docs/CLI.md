@@ -845,7 +845,7 @@ hfdownloader version [flags]
 
 ```bash
 hfdownloader version
-# hfdownloader v3.0.4
+# hfdownloader v3.1.0
 # Go:      go1.21.0
 # OS/Arch: darwin/arm64
 # Commit:  abc123

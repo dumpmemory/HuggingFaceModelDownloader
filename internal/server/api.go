@@ -98,7 +98,7 @@ type SuccessResponse struct {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "ok",
-		"version": "3.0.4",
+		"version": "3.1.0",
 		"time":    time.Now().UTC().Format(time.RFC3339),
 	})
 }
