@@ -69,8 +69,17 @@ func Execute(version string) error {
 	root.AddCommand(newAnalyzeCmd(ctx, ro))
 	root.AddCommand(newProxyCmd(ro))
 
-	// Make download the default command when no subcommand is given
-	root.RunE = downloadCmd.RunE
+	// Use download as the default action, but on a bare invocation with no
+	// arguments — e.g. double-clicking the .exe on Windows — show help instead
+	// of failing with "missing REPO" (github issue #79). Repos are downloaded
+	// via the explicit "download" subcommand (see README).
+	downloadRunE := downloadCmd.RunE
+	root.RunE = func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return cmd.Help()
+		}
+		return downloadRunE(cmd, args)
+	}
 	root.SetHelpCommand(&cobra.Command{Use: "help", Hidden: true})
 
 	if err := root.ExecuteContext(ctx); err != nil {
