@@ -641,7 +641,8 @@
 
     // Add filters - either from GGUF selection or advanced options
     if (selectedQuants.length > 0 && selectedQuants.length < (currentAnalysis.gguf?.quantizations?.length || 0)) {
-      cmd += ` -f "${selectedQuants.join(',')}"`;
+      // Specific quant selection uses exact segment matching (github issue #78)
+      cmd += ` -f "${selectedQuants.join(',')}" --exact`;
     } else if (advancedOptions.filter) {
       cmd += ` -f "${advancedOptions.filter}"`;
     }
@@ -735,7 +736,10 @@
         revision: currentAnalysis?.branch || 'main',
         dataset: isDataset,
         filters,
-        excludes
+        excludes,
+        // Checkbox selections name a specific quant/variant, so match the exact
+        // name segment (q6_k must not also pull q6_k_xl) — github issue #78.
+        exactMatch: filters.length > 0
       };
 
       await api('POST', '/download', body);
@@ -787,6 +791,7 @@
     const revision = $(`#${prefix}Revision`)?.value.trim() || 'main';
     const filter = $(`#${prefix}Filter`)?.value.trim();
     const exclude = $(`#${prefix}Exclude`)?.value.trim();
+    const exactMatch = $(`#${prefix}Exact`)?.checked || false;
 
     if (!repo) {
       showToast('Please enter a repository', 'error');
@@ -798,7 +803,8 @@
       revision,
       dataset: isDataset,
       filters: filter ? filter.split(',').map(s => s.trim()).filter(Boolean) : [],
-      excludes: exclude ? exclude.split(',').map(s => s.trim()).filter(Boolean) : []
+      excludes: exclude ? exclude.split(',').map(s => s.trim()).filter(Boolean) : [],
+      exactMatch
     };
 
     try {
@@ -826,6 +832,7 @@
       dataset: isDataset,
       filters: ($(`#${prefix}Filter`)?.value || '').split(',').map(s => s.trim()).filter(Boolean),
       excludes: ($(`#${prefix}Exclude`)?.value || '').split(',').map(s => s.trim()).filter(Boolean),
+      exactMatch: $(`#${prefix}Exact`)?.checked || false,
       dryRun: true
     };
 

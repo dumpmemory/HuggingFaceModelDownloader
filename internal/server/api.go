@@ -28,6 +28,9 @@ type DownloadRequest struct {
 	Excludes           []string `json:"excludes,omitempty"`
 	AppendFilterSubdir bool     `json:"appendFilterSubdir,omitempty"`
 	DryRun             bool     `json:"dryRun,omitempty"`
+	// ExactMatch matches filters against whole name segments instead of
+	// substrings, so "q6_k" selects Q6_K but not Q6_K_XL (github issue #78).
+	ExactMatch bool `json:"exactMatch,omitempty"`
 }
 
 // PlanResponse is the response for a dry-run/plan request.
@@ -199,6 +202,7 @@ func (s *Server) handlePlanInternal(w http.ResponseWriter, req DownloadRequest) 
 		IsDataset:          req.Dataset,
 		Filters:            req.Filters,
 		Excludes:           req.Excludes,
+		ExactMatch:         req.ExactMatch,
 		AppendFilterSubdir: req.AppendFilterSubdir,
 	}
 

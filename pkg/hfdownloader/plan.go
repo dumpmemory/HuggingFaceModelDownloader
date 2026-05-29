@@ -92,7 +92,7 @@ func scanRepo(ctx context.Context, httpc *http.Client, token string, job Job, cf
 		if isLFS && len(job.Filters) > 0 {
 			for _, f := range job.Filters {
 				fLower := strings.ToLower(f)
-				if strings.Contains(nameLower, fLower) {
+				if filterMatches(nameLower, fLower, job.ExactMatch) {
 					if len(f) > len(matchedFilter) {
 						matchedFilter = f
 					}
@@ -151,6 +151,30 @@ func scanRepo(ctx context.Context, httpc *http.Client, token string, job Job, cf
 		return nil, err
 	}
 	return &Plan{Items: items, Commit: commitSHA}, nil
+}
+
+// filterMatches reports whether filter fLower matches the file name nameLower
+// (both already lowercased). In substring mode (the default) it uses a plain
+// substring check. In exact mode it matches only when fLower equals a whole
+// delimiter-bounded segment of the name, so "q6_k" matches "...-Q6_K.gguf" but
+// not "...-Q6_K_XL.gguf". See Settings.ExactMatch (github issue #78).
+func filterMatches(nameLower, fLower string, exact bool) bool {
+	if !exact {
+		return strings.Contains(nameLower, fLower)
+	}
+	for _, seg := range strings.FieldsFunc(nameLower, isFilterDelimiter) {
+		if seg == fLower {
+			return true
+		}
+	}
+	return false
+}
+
+// isFilterDelimiter reports whether r separates segments for exact-match
+// filtering. Underscores are intentionally NOT delimiters because quantization
+// names contain them (e.g. Q6_K, Q4_K_M).
+func isFilterDelimiter(r rune) bool {
+	return r == '-' || r == '.' || r == ' '
 }
 
 // destinationBase returns the base output directory for a job.

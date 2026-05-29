@@ -17,30 +17,31 @@ import (
 type JobStatus string
 
 const (
-	JobStatusQueued     JobStatus = "queued"
-	JobStatusRunning    JobStatus = "running"
-	JobStatusPaused     JobStatus = "paused"
-	JobStatusCompleted  JobStatus = "completed"
-	JobStatusFailed     JobStatus = "failed"
-	JobStatusCancelled  JobStatus = "cancelled"
+	JobStatusQueued    JobStatus = "queued"
+	JobStatusRunning   JobStatus = "running"
+	JobStatusPaused    JobStatus = "paused"
+	JobStatusCompleted JobStatus = "completed"
+	JobStatusFailed    JobStatus = "failed"
+	JobStatusCancelled JobStatus = "cancelled"
 )
 
 // Job represents a download job.
 type Job struct {
-	ID        string            `json:"id"`
-	Repo      string            `json:"repo"`
-	Revision  string            `json:"revision"`
-	IsDataset bool              `json:"isDataset,omitempty"`
-	Filters   []string          `json:"filters,omitempty"`
-	Excludes  []string          `json:"excludes,omitempty"`
-	OutputDir string            `json:"outputDir"`
-	Status    JobStatus         `json:"status"`
-	Progress  JobProgress       `json:"progress"`
-	Error     string            `json:"error,omitempty"`
-	CreatedAt time.Time         `json:"createdAt"`
-	StartedAt *time.Time        `json:"startedAt,omitempty"`
-	EndedAt   *time.Time        `json:"endedAt,omitempty"`
-	Files     []JobFileProgress `json:"files,omitempty"`
+	ID         string            `json:"id"`
+	Repo       string            `json:"repo"`
+	Revision   string            `json:"revision"`
+	IsDataset  bool              `json:"isDataset,omitempty"`
+	Filters    []string          `json:"filters,omitempty"`
+	Excludes   []string          `json:"excludes,omitempty"`
+	OutputDir  string            `json:"outputDir"`
+	ExactMatch bool              `json:"exactMatch,omitempty"` // Match filters by whole name segment, not substring
+	Status     JobStatus         `json:"status"`
+	Progress   JobProgress       `json:"progress"`
+	Error      string            `json:"error,omitempty"`
+	CreatedAt  time.Time         `json:"createdAt"`
+	StartedAt  *time.Time        `json:"startedAt,omitempty"`
+	EndedAt    *time.Time        `json:"endedAt,omitempty"`
+	Files      []JobFileProgress `json:"files,omitempty"`
 
 	cancel     context.CancelFunc `json:"-"`
 	generation int                `json:"-"` // Tracks which runJob instance is current
@@ -172,16 +173,17 @@ func (m *JobManager) CreateJob(req DownloadRequest) (*Job, bool, error) {
 	}
 
 	job := &Job{
-		ID:        generateID(),
-		Repo:      req.Repo,
-		Revision:  revision,
-		IsDataset: req.Dataset,
-		Filters:   req.Filters,
-		Excludes:  req.Excludes,
-		OutputDir: cacheDir, // HuggingFace cache directory
-		Status:    JobStatusQueued,
-		CreatedAt: time.Now(),
-		Progress:  JobProgress{},
+		ID:         generateID(),
+		Repo:       req.Repo,
+		Revision:   revision,
+		IsDataset:  req.Dataset,
+		Filters:    req.Filters,
+		Excludes:   req.Excludes,
+		OutputDir:  cacheDir, // HuggingFace cache directory
+		ExactMatch: req.ExactMatch,
+		Status:     JobStatusQueued,
+		CreatedAt:  time.Now(),
+		Progress:   JobProgress{},
 	}
 
 	m.jobs[job.ID] = job
@@ -462,6 +464,7 @@ func (m *JobManager) runJob(job *Job) {
 		IsDataset:          job.IsDataset,
 		Filters:            job.Filters,
 		Excludes:           job.Excludes,
+		ExactMatch:         job.ExactMatch,
 		AppendFilterSubdir: false,
 	}
 
@@ -570,4 +573,3 @@ func (m *JobManager) runJob(job *Job) {
 
 	m.notifyListeners(endSnap)
 }
-
