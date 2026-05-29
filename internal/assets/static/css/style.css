@@ -1553,6 +1553,23 @@ a {
   color: var(--color-success);
 }
 
+.storage-mode-badge {
+  align-self: center;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  background: rgba(107, 114, 128, 0.15);
+  color: var(--color-text-secondary);
+  cursor: default;
+}
+
+.storage-mode-badge.storage-mode-local {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--color-success);
+}
+
 .cache-badge {
   padding: 3px 8px;
   border-radius: var(--radius-sm);

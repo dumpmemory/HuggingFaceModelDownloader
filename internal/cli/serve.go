@@ -23,6 +23,7 @@ func newServeCmd(ro *RootOpts) *cobra.Command {
 		modelsDir          string
 		datasetsDir        string
 		cacheDir           string
+		localDir           string
 		conns              int
 		active             int
 		multipartThreshold string
@@ -58,6 +59,7 @@ Examples:
 				ModelsDir:   modelsDir,
 				DatasetsDir: datasetsDir,
 				CacheDir:    cacheDir,
+				LocalDir:    localDir,
 				AuthUser:    authUser,
 				AuthPass:    authPass,
 			}
@@ -129,6 +131,7 @@ Examples:
 	cmd.Flags().StringVar(&modelsDir, "models-dir", "./Models", "Output directory for models (legacy mode)")
 	cmd.Flags().StringVar(&datasetsDir, "datasets-dir", "./Datasets", "Output directory for datasets (legacy mode)")
 	cmd.Flags().StringVar(&cacheDir, "cache-dir", "", "HuggingFace cache directory (default: ~/.cache/huggingface)")
+	cmd.Flags().StringVar(&localDir, "local-dir", "", "Save real files (not HF cache symlinks) into this directory; puts the whole server in flat/local-file mode for all downloads")
 	cmd.Flags().IntVarP(&conns, "connections", "c", 8, "Connections per file")
 	cmd.Flags().IntVar(&active, "max-active", 3, "Max concurrent file downloads")
 	cmd.Flags().StringVar(&multipartThreshold, "multipart-threshold", "32MiB", "Use multipart for files >= this size")

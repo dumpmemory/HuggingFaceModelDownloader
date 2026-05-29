@@ -34,6 +34,7 @@ type Job struct {
 	Filters   []string          `json:"filters,omitempty"`
 	Excludes  []string          `json:"excludes,omitempty"`
 	OutputDir string            `json:"outputDir"`
+	Flat      bool              `json:"flat,omitempty"` // Save real files (flat mode) instead of HF cache layout
 	Status    JobStatus         `json:"status"`
 	Progress  JobProgress       `json:"progress"`
 	Error     string            `json:"error,omitempty"`
@@ -156,6 +157,14 @@ func (m *JobManager) CreateJob(req DownloadRequest) (*Job, bool, error) {
 		cacheDir = hfdownloader.DefaultCacheDir()
 	}
 
+	// Output directory shown to the client. In local mode the whole server
+	// writes real files into LocalDir/<owner>/<repo>; otherwise the HF cache.
+	flat := m.config.LocalDir != ""
+	outputDir := cacheDir
+	if flat {
+		outputDir = m.config.LocalDir
+	}
+
 	// Check for existing active job with same repo+revision+type.
 	// Returning a clone prevents the caller's JSON encoder from racing
 	// against runJob's in-place mutations of the live job.
@@ -178,7 +187,8 @@ func (m *JobManager) CreateJob(req DownloadRequest) (*Job, bool, error) {
 		IsDataset: req.Dataset,
 		Filters:   req.Filters,
 		Excludes:  req.Excludes,
-		OutputDir: cacheDir, // HuggingFace cache directory
+		OutputDir: outputDir,
+		Flat:      flat,
 		Status:    JobStatusQueued,
 		CreatedAt: time.Now(),
 		Progress:  JobProgress{},
@@ -483,6 +493,13 @@ func (m *JobManager) runJob(job *Job) {
 		BackoffMax:         "10s",
 		Endpoint:           m.config.Endpoint,
 		Proxy:              m.config.Proxy,
+	}
+
+	// Local mode: write real files into LocalDir instead of the HF cache
+	// layout. Clearing CacheDir forces flat-file output.
+	if m.config.LocalDir != "" {
+		settings.OutputDir = m.config.LocalDir
+		settings.CacheDir = ""
 	}
 
 	// Progress callback - NOTE: must not hold lock when calling notifyListeners

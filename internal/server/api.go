@@ -56,6 +56,10 @@ type SettingsResponse struct {
 	Verify             string `json:"verify"`
 	Retries            int    `json:"retries"`
 	Endpoint           string `json:"endpoint,omitempty"`
+	// StorageMode is "local" when the server writes real files into LocalDir,
+	// or "cache" when it uses the HF cache layout. Set at startup, read-only.
+	StorageMode string `json:"storageMode"`
+	LocalDir    string `json:"localDir,omitempty"`
 	// Proxy settings
 	Proxy *ProxySettingsResponse `json:"proxy,omitempty"`
 	// Config file paths
@@ -369,6 +373,11 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		cacheDir = hfdownloader.DefaultCacheDir()
 	}
 
+	storageMode := "cache"
+	if s.config.LocalDir != "" {
+		storageMode = "local"
+	}
+
 	resp := SettingsResponse{
 		Token:              tokenStatus,
 		CacheDir:           cacheDir,
@@ -378,6 +387,8 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		Verify:             s.config.Verify,
 		Retries:            s.config.Retries,
 		Endpoint:           s.config.Endpoint,
+		StorageMode:        storageMode,
+		LocalDir:           s.config.LocalDir,
 		ConfigFile:         ConfigPath(),
 		TargetsFile:        hfdownloader.DefaultTargetsPath(),
 	}

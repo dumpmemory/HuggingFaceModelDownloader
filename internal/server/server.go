@@ -24,6 +24,11 @@ type Config struct {
 	ModelsDir          string // Output directory for models (not configurable via API)
 	DatasetsDir        string // Output directory for datasets (not configurable via API)
 	CacheDir           string // HuggingFace cache directory for v3 mode
+	// LocalDir, when set, puts the whole server in flat/local-file mode: every
+	// download writes real files into <LocalDir>/<owner>/<repo> instead of the
+	// HF cache layout. Set once at startup (serve --local-dir); not changeable
+	// per request. Empty = HF cache mode.
+	LocalDir string
 	Concurrency        int
 	MaxActive          int
 	MultipartThreshold string // Minimum size for multipart download
