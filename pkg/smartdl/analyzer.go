@@ -76,7 +76,7 @@ func (a *Analyzer) AnalyzeWithRevision(ctx context.Context, repo string, isDatas
 	}
 
 	// Fetch file tree - auto-detect model vs dataset if not explicitly a dataset
-	files, detectedIsDataset, err := a.fetchFileTreeAutoDetect(ctx, repo, isDataset, revision)
+	files, detectedIsDataset, commit, err := a.fetchFileTreeAutoDetect(ctx, repo, isDataset, revision)
 	if err != nil {
 		return nil, fmt.Errorf("fetch file tree: %w", err)
 	}
@@ -88,6 +88,7 @@ func (a *Analyzer) AnalyzeWithRevision(ctx context.Context, repo string, isDatas
 		IsDataset:  isDataset,
 		Files:      files,
 		FileCount:  len(files),
+		Commit:     commit,
 		Branch:     revision,
 		AnalyzedAt: time.Now().UTC(),
 		Metadata:   make(map[string]interface{}),
@@ -106,6 +107,16 @@ func (a *Analyzer) AnalyzeWithRevision(ctx context.Context, repo string, isDatas
 	// Fetch refs (branches/tags) - non-fatal if fails
 	if refs, err := a.fetchRefs(ctx, repo, isDataset); err == nil {
 		info.Refs = refs
+		// Fallback: if the tree API didn't return X-Repo-Commit, resolve the
+		// commit by matching the requested revision against a branch/tag.
+		if info.Commit == "" {
+			for _, ref := range refs {
+				if ref.Name == revision && ref.Commit != "" {
+					info.Commit = ref.Commit
+					break
+				}
+			}
+		}
 	}
 
 	// Fetch and parse metadata files based on detected type
@@ -142,17 +153,17 @@ type hfTreeNode struct {
 var ErrBothExist = fmt.Errorf("repository exists as both model and dataset")
 
 // fetchFileTreeAutoDetect tries to fetch as model first, then as dataset if 404.
-// Returns the files, whether it's a dataset, and any error.
-// If both model and dataset exist, returns ErrBothExist.
-func (a *Analyzer) fetchFileTreeAutoDetect(ctx context.Context, repo string, isDataset bool, revision string) ([]FileInfo, bool, error) {
+// Returns the files, whether it's a dataset, the resolved commit SHA, and any
+// error. If both model and dataset exist, returns ErrBothExist.
+func (a *Analyzer) fetchFileTreeAutoDetect(ctx context.Context, repo string, isDataset bool, revision string) ([]FileInfo, bool, string, error) {
 	// If explicitly marked as dataset, fetch as dataset directly
 	if isDataset {
-		files, err := a.fetchFileTree(ctx, repo, true, revision)
-		return files, true, err
+		files, commit, err := a.fetchFileTree(ctx, repo, true, revision)
+		return files, true, commit, err
 	}
 
 	// Try as model first
-	modelFiles, modelErr := a.fetchFileTree(ctx, repo, false, revision)
+	modelFiles, modelCommit, modelErr := a.fetchFileTree(ctx, repo, false, revision)
 
 	// Helper to check if error indicates repo doesn't exist as model
 	// HuggingFace returns "not found" for missing repos, but also "unauthorized"
@@ -169,37 +180,40 @@ func (a *Analyzer) fetchFileTreeAutoDetect(ctx context.Context, repo string, isD
 
 	// If model not found or unauthorized, try as dataset
 	if isModelNotFound(modelErr) {
-		datasetFiles, datasetErr := a.fetchFileTree(ctx, repo, true, revision)
+		datasetFiles, datasetCommit, datasetErr := a.fetchFileTree(ctx, repo, true, revision)
 		if datasetErr == nil {
-			return datasetFiles, true, nil
+			return datasetFiles, true, datasetCommit, nil
 		}
 		// If dataset also fails with not found/unauthorized, return helpful error
 		if isModelNotFound(datasetErr) {
-			return nil, false, fmt.Errorf("repository not found as model or dataset: %s", repo)
+			return nil, false, "", fmt.Errorf("repository not found as model or dataset: %s", repo)
 		}
 		// Dataset failed with different error (actual auth issue, network, etc.)
-		return nil, false, datasetErr
+		return nil, false, "", datasetErr
 	}
 
 	// If model found, check if dataset also exists
 	if modelErr == nil {
-		_, datasetErr := a.fetchFileTree(ctx, repo, true, revision)
+		_, _, datasetErr := a.fetchFileTree(ctx, repo, true, revision)
 		if datasetErr == nil {
 			// Both exist - return error so caller can ask user
-			return nil, false, ErrBothExist
+			return nil, false, "", ErrBothExist
 		}
 		// Only model exists
-		return modelFiles, false, nil
+		return modelFiles, false, modelCommit, nil
 	}
 
 	// Return original error for other failures (network, etc.)
-	return nil, false, modelErr
+	return nil, false, "", modelErr
 }
 
 // fetchFileTree recursively fetches the file tree from HuggingFace API.
-func (a *Analyzer) fetchFileTree(ctx context.Context, repo string, isDataset bool, revision string) ([]FileInfo, error) {
+// The second return value is the resolved commit SHA for the revision (from
+// the X-Repo-Commit response header), or "" if the API did not provide it.
+func (a *Analyzer) fetchFileTree(ctx context.Context, repo string, isDataset bool, revision string) ([]FileInfo, string, error) {
 	var files []FileInfo
-	err := a.walkTree(ctx, repo, isDataset, revision, "", func(node hfTreeNode) error {
+	var commit string
+	err := a.walkTree(ctx, repo, isDataset, revision, "", &commit, func(node hfTreeNode) error {
 		if node.Type == "file" || node.Type == "blob" {
 			size := node.Size
 			isLFS := false
@@ -225,11 +239,13 @@ func (a *Analyzer) fetchFileTree(ctx context.Context, repo string, isDataset boo
 		}
 		return nil
 	})
-	return files, err
+	return files, commit, err
 }
 
-// walkTree recursively walks the repository tree.
-func (a *Analyzer) walkTree(ctx context.Context, repo string, isDataset bool, revision, prefix string, fn func(hfTreeNode) error) error {
+// walkTree recursively walks the repository tree. When commitOut is non-nil
+// and still empty, the resolved commit SHA is captured from the X-Repo-Commit
+// response header that HuggingFace returns for the requested revision.
+func (a *Analyzer) walkTree(ctx context.Context, repo string, isDataset bool, revision, prefix string, commitOut *string, fn func(hfTreeNode) error) error {
 	reqURL := a.treeURL(repo, isDataset, revision, prefix)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
@@ -243,6 +259,13 @@ func (a *Analyzer) walkTree(ctx context.Context, repo string, isDataset bool, re
 		return err
 	}
 	defer resp.Body.Close()
+
+	// Capture the resolved commit from the first response that carries it.
+	if commitOut != nil && *commitOut == "" {
+		if c := resp.Header.Get("X-Repo-Commit"); c != "" {
+			*commitOut = c
+		}
+	}
 
 	if resp.StatusCode == 401 {
 		return fmt.Errorf("unauthorized: repo requires token or you do not have access")
@@ -265,7 +288,7 @@ func (a *Analyzer) walkTree(ctx context.Context, repo string, isDataset bool, re
 	for _, n := range nodes {
 		switch n.Type {
 		case "directory", "tree":
-			if err := a.walkTree(ctx, repo, isDataset, revision, n.Path, fn); err != nil {
+			if err := a.walkTree(ctx, repo, isDataset, revision, n.Path, commitOut, fn); err != nil {
 				return err
 			}
 		default:
