@@ -32,10 +32,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.23'
 
@@ -61,7 +61,7 @@ jobs:
             ./cmd/hfdownloader
 
       - name: Upload raw binary
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           files: hfdownloader_${{ matrix.os }}_${{ matrix.arch }}_${{ steps.version.outputs.tag }}${{ matrix.ext }}
 
@@ -84,6 +84,6 @@ jobs:
           cat checksums.txt
 
       - name: Upload checksums
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           files: release-files/checksums.txt
