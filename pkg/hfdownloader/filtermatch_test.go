@@ -42,6 +42,15 @@ func TestFilterMatches(t *testing.T) {
 		// The one coarse-prefix case exact mode intentionally drops.
 		{"qwen3-30b-a3b-q4_k_m.gguf", "q4", true, false},
 		{"qwen3-30b-a3b-q4_k_m.gguf", "q4", false, true},
+
+		// Vision encoder (mmproj) companion: its filter is the full file name
+		// minus ".gguf" (multi-segment), so exact mode must match it via the
+		// whole-name rule, not segment-by-segment (github issue #84 regression).
+		{"qwen3.6-35b-a3b-mmproj-bf16.gguf", "qwen3.6-35b-a3b-mmproj-bf16", true, true},
+		// ...and it must not match the main model quant file.
+		{"qwen3.6-35b-a3b-q4_k_m.gguf", "qwen3.6-35b-a3b-mmproj-bf16", true, false},
+		// Whole-name filter including the extension also matches.
+		{"model-mmproj-f16.gguf", "model-mmproj-f16.gguf", true, true},
 	}
 
 	for _, tt := range tests {

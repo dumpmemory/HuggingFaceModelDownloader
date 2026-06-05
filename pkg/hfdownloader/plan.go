@@ -155,12 +155,19 @@ func scanRepo(ctx context.Context, httpc *http.Client, token string, job Job, cf
 
 // filterMatches reports whether filter fLower matches the file name nameLower
 // (both already lowercased). In substring mode (the default) it uses a plain
-// substring check. In exact mode it matches only when fLower equals a whole
-// delimiter-bounded segment of the name, so "q6_k" matches "...-Q6_K.gguf" but
-// not "...-Q6_K_XL.gguf". See Settings.ExactMatch (github issue #78).
+// substring check. In exact mode it matches when fLower equals either the whole
+// file name (with or without its extension) or a single delimiter-bounded
+// segment of the name. So "q6_k" matches "...-Q6_K.gguf" but not
+// "...-Q6_K_XL.gguf" (github issue #78), while a full-name filter such as a
+// vision encoder's "...-mmproj-bf16" still matches its file (github issue #84).
 func filterMatches(nameLower, fLower string, exact bool) bool {
 	if !exact {
 		return strings.Contains(nameLower, fLower)
+	}
+	// Whole-name match: handles filters that are a full file name, e.g. the
+	// mmproj/vision-encoder companion whose filter is the name minus ".gguf".
+	if fLower == nameLower || fLower == strings.TrimSuffix(nameLower, filepath.Ext(nameLower)) {
+		return true
 	}
 	for _, seg := range strings.FieldsFunc(nameLower, isFilterDelimiter) {
 		if seg == fLower {
