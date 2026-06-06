@@ -106,14 +106,19 @@ func walkTree(ctx context.Context, httpc *http.Client, token, endpoint string, j
 	}
 	defer resp.Body.Close()
 
+	// Return a typed *APIError so callers can errors.Is(err, ErrUnauthorized)
+	// / ErrNotFound / ErrRateLimited (see APIError.Is) instead of matching on
+	// message strings.
 	if resp.StatusCode == 401 {
-		return fmt.Errorf("401 unauthorized: repo requires token or you do not have access (visit %s)", agreementURL(endpoint, job))
+		return &APIError{StatusCode: 401, Status: resp.Status, URL: reqURL,
+			Message: fmt.Sprintf("repo requires token or you do not have access (visit %s)", agreementURL(endpoint, job))}
 	}
 	if resp.StatusCode == 403 {
-		return fmt.Errorf("403 forbidden: please accept the repository terms: %s", agreementURL(endpoint, job))
+		return &APIError{StatusCode: 403, Status: resp.Status, URL: reqURL,
+			Message: fmt.Sprintf("please accept the repository terms: %s", agreementURL(endpoint, job))}
 	}
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("tree API failed: %s", resp.Status)
+		return &APIError{StatusCode: resp.StatusCode, Status: resp.Status, URL: reqURL}
 	}
 
 	var nodes []hfNode
@@ -212,7 +217,7 @@ func fetchRepoInfo(ctx context.Context, httpc *http.Client, token, endpoint stri
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("repo info API failed: %s", resp.Status)
+		return nil, &APIError{StatusCode: resp.StatusCode, Status: resp.Status, URL: reqURL}
 	}
 
 	var info RepoInfo

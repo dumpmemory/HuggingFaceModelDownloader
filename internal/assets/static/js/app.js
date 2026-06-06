@@ -118,6 +118,12 @@
       jobs.forEach(job => {
         state.jobs.set(job.id, job);
       });
+      // Show the real running version reported by the server (avoids a stamp
+      // hardcoded in the HTML drifting out of date).
+      if (msg.data?.version) {
+        const vEl = document.getElementById('appVersion');
+        if (vEl) vEl.textContent = 'v' + msg.data.version;
+      }
       updateJobsBadge();
       if (state.currentPage === 'jobs') {
         renderJobs();

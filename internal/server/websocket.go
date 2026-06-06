@@ -7,20 +7,40 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		// Allow all origins for development
-		// In production, you'd want to check the Origin header
+// isAllowedWSOrigin decides whether a WebSocket upgrade request may proceed.
+// Browsers attach an Origin header to cross-site WebSocket handshakes but —
+// unlike fetch/XHR — the browser does NOT enforce the CORS response on the
+// connection, so the server itself must reject disallowed origins or any web
+// page the user visits could open a socket to a locally-bound server and stream
+// job state (cross-site WebSocket hijacking). Policy:
+//   - No Origin header (native clients such as curl/websocat): allow.
+//   - Same-origin (Origin host == request host): allow.
+//   - Otherwise: allow only if the origin is in AllowedOrigins (or it is "*").
+//
+// With no AllowedOrigins configured this is default-deny for cross-origin,
+// which matches the safe expectation for a tool bound to localhost/0.0.0.0.
+func (s *Server) isAllowedWSOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// Non-browser client; no Origin to forge or hijack.
 		return true
-	},
+	}
+	if u, err := url.Parse(origin); err == nil && u.Host != "" && u.Host == r.Host {
+		return true
+	}
+	for _, o := range s.config.AllowedOrigins {
+		if o == "*" || o == origin {
+			return true
+		}
+	}
+	return false
 }
 
 // WSMessage represents a message sent over WebSocket.
@@ -31,11 +51,26 @@ type WSMessage struct {
 
 // WSClient represents a connected WebSocket client.
 type WSClient struct {
-	conn   *websocket.Conn
-	send   chan []byte
-	hub    *WSHub
-	closed bool
-	mu     sync.Mutex
+	conn      *websocket.Conn
+	send      chan []byte
+	hub       *WSHub
+	closeOnce sync.Once
+	closed    bool
+	mu        sync.Mutex
+}
+
+// closeSend closes the client's send channel exactly once and marks the client
+// closed. Both the hub's unregister path and its slow-client eviction path call
+// this; sync.Once makes a double close (which would panic) impossible. The
+// closed flag is set under c.mu so sendInitialState, which sends under the same
+// lock, can never write to an already-closed channel.
+func (c *WSClient) closeSend() {
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		c.closed = true
+		c.mu.Unlock()
+		close(c.send)
+	})
 }
 
 // WSHub manages WebSocket clients and broadcasts.
@@ -64,30 +99,39 @@ func (h *WSHub) Run() {
 		case client := <-h.register:
 			h.mu.Lock()
 			h.clients[client] = true
+			count := len(h.clients)
 			h.mu.Unlock()
-			log.Printf("[WS] Client connected (%d total)", len(h.clients))
+			log.Printf("[WS] Client connected (%d total)", count)
 
 		case client := <-h.unregister:
 			h.mu.Lock()
+			count := len(h.clients)
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
-				close(client.send)
+				client.closeSend()
+				count = len(h.clients)
 			}
 			h.mu.Unlock()
-			log.Printf("[WS] Client disconnected (%d total)", len(h.clients))
+			log.Printf("[WS] Client disconnected (%d total)", count)
 
 		case message := <-h.broadcast:
-			h.mu.RLock()
+			// Take the write lock: a full send buffer means we must evict the
+			// client, which mutates h.clients. Iterating + deleting under only
+			// RLock (the previous behaviour) is a concurrent map write that can
+			// panic and tear down the whole hub. Broadcasts come from a single
+			// goroutine, so the extra exclusivity costs nothing in practice.
+			h.mu.Lock()
 			for client := range h.clients {
 				select {
 				case client.send <- message:
 				default:
-					// Client's buffer is full, disconnect
-					close(client.send)
+					// Client's buffer is full: drop it. closeSend is
+					// once-guarded so the later unregister can't double close.
 					delete(h.clients, client)
+					client.closeSend()
 				}
 			}
-			h.mu.RUnlock()
+			h.mu.Unlock()
 		}
 	}
 }
@@ -131,7 +175,7 @@ func (h *WSHub) ClientCount() int {
 
 // handleWebSocket handles WebSocket connections.
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[WS] Upgrade failed: %v", err)
 		return
@@ -161,7 +205,7 @@ func (s *Server) sendInitialState(client *WSClient) {
 		Type: "init",
 		Data: map[string]any{
 			"jobs":    jobs,
-			"version": "3.1.1",
+			"version": s.version(),
 		},
 	}
 	

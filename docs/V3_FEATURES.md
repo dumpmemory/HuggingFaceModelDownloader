@@ -282,8 +282,8 @@ hfdownloader serve --port 9000 --addr 0.0.0.0
 # With authentication
 hfdownloader serve --auth-user admin --auth-pass secret
 
-# Custom CORS origins
-hfdownloader serve --cors "http://localhost:3000,https://myapp.com"
+# Use a mirror endpoint
+hfdownloader serve --endpoint https://hf-mirror.com
 ```
 
 ### Features
@@ -337,11 +337,11 @@ hfdownloader info meta-llama/Llama-2-7b --json
 ### Rebuild Cache
 
 ```bash
-# Rebuild friendly view symlinks
+# Rebuild friendly view symlinks (whole cache)
 hfdownloader rebuild
 
-# Rebuild for specific repo
-hfdownloader rebuild meta-llama/Llama-2-7b
+# Also (re)write the standalone rebuild.sh script into the cache
+hfdownloader rebuild --write-script
 ```
 
 ---

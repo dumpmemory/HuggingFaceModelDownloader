@@ -107,8 +107,40 @@ func NewJobManager(cfg Config, wsHub *WSHub) *JobManager {
 // generateID creates a short random ID.
 func generateID() string {
 	b := make([]byte, 6)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand does not fail on supported platforms; if it somehow
+		// does, panic rather than return a predictable or empty ID that two
+		// jobs could collide on.
+		panic("hfdownloader: crypto/rand unavailable: " + err.Error())
+	}
 	return hex.EncodeToString(b)
+}
+
+// snapshotConfig returns a copy of the manager's config under the read lock so
+// callers never read a field while UpdateConfig is replacing it. The copy
+// shares the *ProxyConfig pointer, which is safe because UpdateConfig publishes
+// a fresh ProxyConfig on change rather than mutating the existing one in place.
+func (m *JobManager) snapshotConfig() Config {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config
+}
+
+// UpdateConfig atomically replaces the manager's config. Called from
+// POST /api/settings; in-flight runJob goroutines that already snapshotted the
+// previous config keep using it until they finish.
+func (m *JobManager) UpdateConfig(cfg Config) {
+	m.mu.Lock()
+	m.config = cfg
+	m.mu.Unlock()
+}
+
+// Stop halts background machinery owned by the manager (currently the
+// WebSocket broadcast coalescer). Safe to call multiple times.
+func (m *JobManager) Stop() {
+	if m.wsCoalescer != nil {
+		m.wsCoalescer.stop()
+	}
 }
 
 // cloneJobLocked returns a fully-independent copy of a Job. Must be called
@@ -152,18 +184,20 @@ func (m *JobManager) CreateJob(req DownloadRequest) (*Job, bool, error) {
 		revision = "main"
 	}
 
+	cfg := m.snapshotConfig()
+
 	// Use HuggingFace cache directory (v3 mode)
-	cacheDir := m.config.CacheDir
+	cacheDir := cfg.CacheDir
 	if cacheDir == "" {
 		cacheDir = hfdownloader.DefaultCacheDir()
 	}
 
 	// Output directory shown to the client. In local mode the whole server
 	// writes real files into LocalDir/<owner>/<repo>; otherwise the HF cache.
-	flat := m.config.LocalDir != ""
+	flat := cfg.LocalDir != ""
 	outputDir := cacheDir
 	if flat {
-		outputDir = m.config.LocalDir
+		outputDir = cfg.LocalDir
 	}
 
 	// Check for existing active job with same repo+revision+type.
@@ -453,6 +487,8 @@ func (m *JobManager) notifyListeners(snapshot *Job) {
 func (m *JobManager) runJob(job *Job) {
 	defer m.runWG.Done()
 
+	cfg := m.snapshotConfig()
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Increment generation and store our generation number
@@ -479,29 +515,29 @@ func (m *JobManager) runJob(job *Job) {
 	}
 
 	// Use HuggingFace cache structure (v3 mode) instead of legacy OutputDir
-	cacheDir := m.config.CacheDir
+	cacheDir := cfg.CacheDir
 	if cacheDir == "" {
 		cacheDir = hfdownloader.DefaultCacheDir()
 	}
 
 	settings := hfdownloader.Settings{
 		CacheDir:           cacheDir, // Use HF cache structure
-		Concurrency:        m.config.Concurrency,
-		MaxActiveDownloads: m.config.MaxActive,
-		Token:              m.config.Token,
-		MultipartThreshold: m.config.MultipartThreshold,
-		Verify:             m.config.Verify,
-		Retries:            m.config.Retries,
+		Concurrency:        cfg.Concurrency,
+		MaxActiveDownloads: cfg.MaxActive,
+		Token:              cfg.Token,
+		MultipartThreshold: cfg.MultipartThreshold,
+		Verify:             cfg.Verify,
+		Retries:            cfg.Retries,
 		BackoffInitial:     "400ms",
 		BackoffMax:         "10s",
-		Endpoint:           m.config.Endpoint,
-		Proxy:              m.config.Proxy,
+		Endpoint:           cfg.Endpoint,
+		Proxy:              cfg.Proxy,
 	}
 
 	// Local mode: write real files into LocalDir instead of the HF cache
 	// layout. Clearing CacheDir forces flat-file output.
-	if m.config.LocalDir != "" {
-		settings.OutputDir = m.config.LocalDir
+	if cfg.LocalDir != "" {
+		settings.OutputDir = cfg.LocalDir
 		settings.CacheDir = ""
 	}
 

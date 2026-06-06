@@ -4,7 +4,6 @@
 package hfdownloader
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -349,104 +348,6 @@ func TestRepoDir_WriteAndReadRef(t *testing.T) {
 			t.Errorf("ReadRef() = %q, want empty string", read)
 		}
 	})
-}
-
-func TestRepoDir_WriteIncompleteMeta(t *testing.T) {
-	tmpDir := t.TempDir()
-	cache := NewHFCache(tmpDir, 0)
-	repo, _ := cache.Repo("owner/name", RepoTypeModel)
-	repo.EnsureDirs()
-
-	sha := "test123"
-	size := int64(1024)
-
-	if err := repo.WriteIncompleteMeta(sha, size); err != nil {
-		t.Fatalf("WriteIncompleteMeta error: %v", err)
-	}
-
-	// Read and verify metadata
-	metaPath := repo.IncompleteMetaPath(sha)
-	data, err := os.ReadFile(metaPath)
-	if err != nil {
-		t.Fatalf("ReadFile error: %v", err)
-	}
-
-	var meta IncompleteMeta
-	if err := json.Unmarshal(data, &meta); err != nil {
-		t.Fatalf("Unmarshal error: %v", err)
-	}
-
-	if meta.PID != os.Getpid() {
-		t.Errorf("PID = %d, want %d", meta.PID, os.Getpid())
-	}
-	if meta.Size != size {
-		t.Errorf("Size = %d, want %d", meta.Size, size)
-	}
-	if meta.SHA256 != sha {
-		t.Errorf("SHA256 = %q, want %q", meta.SHA256, sha)
-	}
-}
-
-func TestRepoDir_CleanupIncomplete(t *testing.T) {
-	tmpDir := t.TempDir()
-	cache := NewHFCache(tmpDir, 0)
-	repo, _ := cache.Repo("owner/name", RepoTypeModel)
-	repo.EnsureDirs()
-
-	sha := "cleanup123"
-
-	// Create incomplete files
-	incompletePath := repo.IncompletePath(sha)
-	metaPath := repo.IncompleteMetaPath(sha)
-	os.WriteFile(incompletePath, []byte("partial"), 0644)
-	os.WriteFile(metaPath, []byte("{}"), 0644)
-
-	if err := repo.CleanupIncomplete(sha); err != nil {
-		t.Fatalf("CleanupIncomplete error: %v", err)
-	}
-
-	// Verify files are removed
-	if _, err := os.Stat(incompletePath); !os.IsNotExist(err) {
-		t.Error("incomplete file should be removed")
-	}
-	if _, err := os.Stat(metaPath); !os.IsNotExist(err) {
-		t.Error("incomplete meta file should be removed")
-	}
-}
-
-func TestRepoDir_FinalizeBlob(t *testing.T) {
-	tmpDir := t.TempDir()
-	cache := NewHFCache(tmpDir, 0)
-	repo, _ := cache.Repo("owner/name", RepoTypeModel)
-	repo.EnsureDirs()
-
-	sha := "final123"
-	content := []byte("complete data")
-
-	// Create incomplete file
-	incompletePath := repo.IncompletePath(sha)
-	metaPath := repo.IncompleteMetaPath(sha)
-	os.WriteFile(incompletePath, content, 0644)
-	os.WriteFile(metaPath, []byte("{}"), 0644)
-
-	if err := repo.FinalizeBlob(sha); err != nil {
-		t.Fatalf("FinalizeBlob error: %v", err)
-	}
-
-	// Verify blob exists
-	blobPath := repo.BlobPath(sha)
-	data, err := os.ReadFile(blobPath)
-	if err != nil {
-		t.Fatalf("blob file not found: %v", err)
-	}
-	if string(data) != string(content) {
-		t.Error("blob content mismatch")
-	}
-
-	// Verify incomplete is removed
-	if _, err := os.Stat(incompletePath); !os.IsNotExist(err) {
-		t.Error("incomplete file should be removed")
-	}
 }
 
 func TestRepoDir_ListSnapshots(t *testing.T) {

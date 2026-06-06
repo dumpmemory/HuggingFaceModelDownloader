@@ -98,7 +98,7 @@ type SuccessResponse struct {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "ok",
-		"version": "3.1.1",
+		"version": s.version(),
 		"time":    time.Now().UTC().Format(time.RFC3339),
 	})
 }
@@ -366,45 +366,48 @@ func (s *Server) handleDismissJob(w http.ResponseWriter, r *http.Request) {
 
 // handleGetSettings returns current settings.
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	// Read a consistent snapshot so we never observe a field mid-update.
+	cfg := s.settingsConfig()
+
 	// Don't expose full token, just indicate if set
 	tokenStatus := ""
-	if s.config.Token != "" {
-		tokenStatus = "********" + s.config.Token[max(0, len(s.config.Token)-4):]
+	if cfg.Token != "" {
+		tokenStatus = "********" + cfg.Token[max(0, len(cfg.Token)-4):]
 	}
 
-	cacheDir := s.config.CacheDir
+	cacheDir := cfg.CacheDir
 	if cacheDir == "" {
 		cacheDir = hfdownloader.DefaultCacheDir()
 	}
 
 	storageMode := "cache"
-	if s.config.LocalDir != "" {
+	if cfg.LocalDir != "" {
 		storageMode = "local"
 	}
 
 	resp := SettingsResponse{
 		Token:              tokenStatus,
 		CacheDir:           cacheDir,
-		Concurrency:        s.config.Concurrency,
-		MaxActive:          s.config.MaxActive,
-		MultipartThreshold: s.config.MultipartThreshold,
-		Verify:             s.config.Verify,
-		Retries:            s.config.Retries,
-		Endpoint:           s.config.Endpoint,
+		Concurrency:        cfg.Concurrency,
+		MaxActive:          cfg.MaxActive,
+		MultipartThreshold: cfg.MultipartThreshold,
+		Verify:             cfg.Verify,
+		Retries:            cfg.Retries,
+		Endpoint:           cfg.Endpoint,
 		StorageMode:        storageMode,
-		LocalDir:           s.config.LocalDir,
+		LocalDir:           cfg.LocalDir,
 		ConfigFile:         ConfigPath(),
 		TargetsFile:        hfdownloader.DefaultTargetsPath(),
 	}
 
 	// Add proxy settings (without password for security)
-	if s.config.Proxy != nil && s.config.Proxy.URL != "" {
+	if cfg.Proxy != nil && cfg.Proxy.URL != "" {
 		resp.Proxy = &ProxySettingsResponse{
-			URL:                s.config.Proxy.URL,
-			Username:           s.config.Proxy.Username,
-			NoProxy:            s.config.Proxy.NoProxy,
-			NoEnvProxy:         s.config.Proxy.NoEnvProxy,
-			InsecureSkipVerify: s.config.Proxy.InsecureSkipVerify,
+			URL:                cfg.Proxy.URL,
+			Username:           cfg.Proxy.Username,
+			NoProxy:            cfg.Proxy.NoProxy,
+			NoEnvProxy:         cfg.Proxy.NoEnvProxy,
+			InsecureSkipVerify: cfg.Proxy.InsecureSkipVerify,
 		}
 	}
 
@@ -439,7 +442,10 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update config (only safe fields)
+	// Apply updates under the write lock. Only the API-mutable fields are
+	// touched; startup-only fields (dirs, auth, origins) are left untouched so
+	// the middleware that reads them lock-free never races this writer.
+	s.configMu.Lock()
 	if req.Token != nil {
 		s.config.Token = *req.Token
 	}
@@ -462,57 +468,65 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		s.config.Endpoint = *req.Endpoint
 	}
 
-	// Update proxy settings
+	// Update proxy settings using copy-on-write: build a fresh ProxyConfig and
+	// publish the new pointer rather than mutating the existing struct in
+	// place. In-flight downloads (and any snapshot) keep pointing at the old,
+	// now-immutable ProxyConfig, so there is no torn read of proxy fields.
 	if req.Proxy != nil {
-		if s.config.Proxy == nil {
-			s.config.Proxy = &hfdownloader.ProxyConfig{}
+		var np hfdownloader.ProxyConfig
+		if s.config.Proxy != nil {
+			np = *s.config.Proxy // start from current values
 		}
 		if req.Proxy.URL != nil {
-			s.config.Proxy.URL = *req.Proxy.URL
+			np.URL = *req.Proxy.URL
 		}
 		if req.Proxy.Username != nil {
-			s.config.Proxy.Username = *req.Proxy.Username
+			np.Username = *req.Proxy.Username
 		}
 		if req.Proxy.Password != nil {
-			s.config.Proxy.Password = *req.Proxy.Password
+			np.Password = *req.Proxy.Password
 		}
 		if req.Proxy.NoProxy != nil {
-			s.config.Proxy.NoProxy = *req.Proxy.NoProxy
+			np.NoProxy = *req.Proxy.NoProxy
 		}
 		if req.Proxy.NoEnvProxy != nil {
-			s.config.Proxy.NoEnvProxy = *req.Proxy.NoEnvProxy
+			np.NoEnvProxy = *req.Proxy.NoEnvProxy
 		}
 		if req.Proxy.InsecureSkipVerify != nil {
-			s.config.Proxy.InsecureSkipVerify = *req.Proxy.InsecureSkipVerify
+			np.InsecureSkipVerify = *req.Proxy.InsecureSkipVerify
 		}
-		// Clear proxy if URL is empty
-		if s.config.Proxy.URL == "" {
-			s.config.Proxy = nil
+		if np.URL == "" {
+			s.config.Proxy = nil // clear proxy if URL is empty
+		} else {
+			s.config.Proxy = &np
 		}
 	}
 
-	// Also update job manager config
-	s.jobs.config = s.config
+	// Snapshot the updated config while still holding the lock, then publish it
+	// to the job manager (which guards its own copy).
+	updated := s.config
+	s.configMu.Unlock()
+	s.jobs.UpdateConfig(updated)
 
 	// Persist settings to config file
 	fileCfg := &ConfigFile{
-		Token:              s.config.Token,
-		Connections:        s.config.Concurrency,
-		MaxActive:          s.config.MaxActive,
-		MultipartThreshold: s.config.MultipartThreshold,
-		Verify:             s.config.Verify,
-		Retries:            s.config.Retries,
-		Endpoint:           s.config.Endpoint,
+		Token:              updated.Token,
+		Connections:        updated.Concurrency,
+		MaxActive:          updated.MaxActive,
+		MultipartThreshold: updated.MultipartThreshold,
+		Verify:             updated.Verify,
+		Retries:            updated.Retries,
+		Endpoint:           updated.Endpoint,
 	}
 	// Add proxy to config file if set
-	if s.config.Proxy != nil {
+	if updated.Proxy != nil {
 		fileCfg.Proxy = &ProxyConfig{
-			URL:                s.config.Proxy.URL,
-			Username:           s.config.Proxy.Username,
-			Password:           s.config.Proxy.Password,
-			NoProxy:            s.config.Proxy.NoProxy,
-			NoEnvProxy:         s.config.Proxy.NoEnvProxy,
-			InsecureSkipVerify: s.config.Proxy.InsecureSkipVerify,
+			URL:                updated.Proxy.URL,
+			Username:           updated.Proxy.Username,
+			Password:           updated.Proxy.Password,
+			NoProxy:            updated.Proxy.NoProxy,
+			NoEnvProxy:         updated.Proxy.NoEnvProxy,
+			InsecureSkipVerify: updated.Proxy.InsecureSkipVerify,
 		}
 	}
 	if err := SaveConfigFile(fileCfg); err != nil {

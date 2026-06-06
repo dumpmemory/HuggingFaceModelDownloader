@@ -294,52 +294,6 @@ func (r *RepoDir) readIncompleteMeta(path string) (*IncompleteMeta, error) {
 	return &meta, nil
 }
 
-// WriteIncompleteMeta writes metadata for an incomplete download.
-func (r *RepoDir) WriteIncompleteMeta(sha256 string, size int64) error {
-	meta := IncompleteMeta{
-		PID:       os.Getpid(),
-		StartedAt: time.Now().UTC(),
-		Size:      size,
-		SHA256:    sha256,
-	}
-	data, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(r.IncompleteMetaPath(sha256), data, 0644)
-}
-
-// CleanupIncomplete removes the .incomplete and .incomplete.meta files.
-func (r *RepoDir) CleanupIncomplete(sha256 string) error {
-	var errs []error
-	if err := os.Remove(r.IncompletePath(sha256)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, err)
-	}
-	if err := os.Remove(r.IncompleteMetaPath(sha256)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, err)
-	}
-	if len(errs) > 0 {
-		return fmt.Errorf("cleanup incomplete: %v", errs)
-	}
-	return nil
-}
-
-// FinalizeBlob moves a completed .incomplete file to its final blob location.
-func (r *RepoDir) FinalizeBlob(sha256 string) error {
-	incompletePath := r.IncompletePath(sha256)
-	blobPath := r.BlobPath(sha256)
-
-	// Move incomplete to final location
-	if err := os.Rename(incompletePath, blobPath); err != nil {
-		return fmt.Errorf("rename incomplete to blob: %w", err)
-	}
-
-	// Remove metadata file
-	_ = os.Remove(r.IncompleteMetaPath(sha256))
-
-	return nil
-}
-
 // isProcessAlive checks if a process with the given PID is still running.
 func isProcessAlive(pid int) bool {
 	if pid <= 0 {

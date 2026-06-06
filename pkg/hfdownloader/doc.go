@@ -114,12 +114,14 @@ No external metadata files are created or required.
 
 # Verification Options
 
-The Settings.Verify field controls post-download verification:
+Files with a known content SHA256 (all LFS files, plus any a mirror annotates)
+are always SHA-256 verified. The Settings.Verify field controls verification for
+the remaining files:
 
-  - "none": No verification (fastest)
+  - "none": No extra verification (fastest)
   - "size": Verify file size matches expected (default)
-  - "etag": Compare ETag header from server
-  - "sha256": Full SHA-256 hash verification (most secure, slower)
+  - "etag" / "sha256": Fetch the server's content hash via HEAD and verify it,
+    falling back to a size check when the server exposes no hash.
 
 # Concurrency
 

@@ -6,14 +6,17 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/bodaay/HuggingFaceModelDownloader/internal/assets"
 	"github.com/bodaay/HuggingFaceModelDownloader/pkg/hfdownloader"
+	"github.com/gorilla/websocket"
 )
 
 // Config holds server configuration.
@@ -43,6 +46,20 @@ type Config struct {
 
 	// Proxy configuration
 	Proxy *hfdownloader.ProxyConfig
+
+	// Version is the build version string (injected via ldflags and passed
+	// down from the CLI). Reported by /api/health and the WebSocket init
+	// message so the web UI shows the real running version instead of a stamp
+	// hardcoded in source. Empty in tests / library use.
+	Version string
+}
+
+// version returns the build version, or "dev" when unset (tests/library use).
+func (s *Server) version() string {
+	if s.config.Version != "" {
+		return s.config.Version
+	}
+	return "dev"
 }
 
 // DefaultConfig returns sensible defaults.
@@ -62,10 +79,17 @@ func DefaultConfig() Config {
 
 // Server is the HTTP server for hfdownloader.
 type Server struct {
+	// configMu guards the mutable fields of config (those changeable via
+	// POST /api/settings: Token, Concurrency, MaxActive, MultipartThreshold,
+	// Verify, Retries, Endpoint, Proxy). Startup-only fields (Addr, Port,
+	// dirs, AllowedOrigins, Auth*) are never written after New and are read
+	// without the lock.
+	configMu   sync.RWMutex
 	config     Config
 	httpServer *http.Server
 	jobs       *JobManager
 	wsHub      *WSHub
+	upgrader   websocket.Upgrader
 }
 
 // New creates a new server with the given configuration.
@@ -76,7 +100,21 @@ func New(cfg Config) *Server {
 		jobs:   NewJobManager(cfg, wsHub),
 		wsHub:  wsHub,
 	}
+	s.upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin:     s.isAllowedWSOrigin,
+	}
 	return s
+}
+
+// settingsConfig returns a snapshot of the API-mutable settings under the read
+// lock. Callers that need the current Token/Concurrency/Verify/Proxy/etc. use
+// this so they never read a field while handleUpdateSettings is writing it.
+func (s *Server) settingsConfig() Config {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	return s.config
 }
 
 // ListenAndServe starts the HTTP server.
@@ -143,6 +181,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		s.httpServer.Shutdown(shutdownCtx)
+		// Halt the WebSocket broadcast coalescer so its pending AfterFunc
+		// timers don't fire (and leak) after the server has stopped.
+		s.jobs.Stop()
 	}()
 
 	log.Printf("🚀 Server starting on http://%s", addr)
@@ -259,7 +300,11 @@ func (s *Server) basicAuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		user, pass, ok := r.BasicAuth()
-		if !ok || user != s.config.AuthUser || pass != s.config.AuthPass {
+		// Constant-time comparison avoids leaking the configured credentials
+		// through response-timing differences. Both comparisons always run.
+		userOK := subtle.ConstantTimeCompare([]byte(user), []byte(s.config.AuthUser)) == 1
+		passOK := subtle.ConstantTimeCompare([]byte(pass), []byte(s.config.AuthPass)) == 1
+		if !ok || !userOK || !passOK {
 			w.Header().Set("WWW-Authenticate", `Basic realm="HF Downloader"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return

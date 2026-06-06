@@ -62,6 +62,7 @@ Examples:
 				LocalDir:    localDir,
 				AuthUser:    authUser,
 				AuthPass:    authPass,
+				Version:     cmd.Root().Version, // injected build version (ldflags)
 			}
 
 			// Apply config file settings first (for values not set by CLI)

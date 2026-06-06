@@ -718,6 +718,100 @@ Get cached repository details.
 curl http://localhost:8080/api/cache/TheBloke/Mistral-7B-Instruct-v0.2-GGUF
 ```
 
+#### POST /api/cache/rebuild
+
+Regenerate the friendly view symlinks from the hub cache.
+
+Request body (optional):
+
+```json
+{ "clean": true }
+```
+
+`clean` (default `false`) also removes orphaned symlinks.
+
+```bash
+curl -X POST http://localhost:8080/api/cache/rebuild -d '{"clean":true}'
+```
+
+#### DELETE /api/cache/{repo}
+
+Delete a cached repository (blobs, snapshots and friendly-view symlinks). The
+repo path is validated to stay inside the cache directory.
+
+```bash
+curl -X DELETE http://localhost:8080/api/cache/TheBloke/Mistral-7B-Instruct-v0.2-GGUF
+```
+
+---
+
+### Jobs (continued)
+
+#### POST /api/jobs/{id}/dismiss
+
+Permanently remove a finished job from the list so it does not reappear on
+refresh. Only jobs in a terminal state (`completed`, `failed`, `cancelled`,
+`paused`) may be dismissed; dismissing a `queued`/`running` job returns `409`
+(cancel it first).
+
+```bash
+curl -X POST http://localhost:8080/api/jobs/a1b2c3d4e5f6/dismiss
+```
+
+---
+
+### Mirror
+
+Manage named mirror targets and copy repos between cache directories.
+
+#### GET /api/mirror/targets
+
+List configured mirror targets.
+
+#### POST /api/mirror/targets
+
+Add a target.
+
+```json
+{ "name": "office", "path": "/mnt/nas/hf-cache", "description": "optional" }
+```
+
+#### DELETE /api/mirror/targets/{name}
+
+Remove a target by name.
+
+#### POST /api/mirror/diff
+
+Show which repos differ between the local cache and a target.
+
+```json
+{ "target": "office", "repoFilter": "" }
+```
+
+#### POST /api/mirror/push  •  POST /api/mirror/pull
+
+Copy repos to (`push`) or from (`pull`) a target. Same request body for both:
+
+```json
+{
+  "target": "office",
+  "repoFilter": "",
+  "dryRun": false,
+  "verify": false,
+  "deleteExtra": false,
+  "force": false
+}
+```
+
+`verify` performs a full SHA256 integrity check of each copied blob (slower).
+
+```bash
+curl -X POST http://localhost:8080/api/mirror/push -d '{"target":"office","verify":true}'
+```
+
+> Note: a large push/pull runs synchronously and may exceed the HTTP server
+> write timeout; for very large transfers prefer the `mirror` CLI command.
+
 ---
 
 ## WebSocket API

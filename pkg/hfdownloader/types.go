@@ -149,14 +149,18 @@ type Settings struct {
 	// If empty, defaults to "256MiB".
 	MultipartThreshold string
 
-	// Verify specifies how to verify non-LFS files after download.
-	// LFS files are always verified by SHA-256 when the hash is available.
+	// Verify selects post-download verification for files that do NOT carry a
+	// content hash in the plan. Any file with a known SHA256 — every LFS file,
+	// plus any a mirror annotates — is ALWAYS verified by SHA-256 regardless of
+	// this setting. (This also covers every multipart download, since range
+	// requests are only used for LFS files.)
 	//
 	// Options:
-	//   - "none": No verification (fastest)
-	//   - "size": Verify file size matches expected (default, fast)
-	//   - "etag": Compare ETag header from server
-	//   - "sha256": Full SHA-256 hash verification (most secure, slower)
+	//   - "none":   No extra verification (fastest)
+	//   - "size":   Verify the file size matches expected (default, fast)
+	//   - "etag" / "sha256": Fetch the server's content hash via a HEAD request
+	//     and verify it; if the server exposes no hash, fall back to a size
+	//     check (so neither mode is ever a silent no-op).
 	Verify string
 
 	// Retries is the maximum number of retry attempts per HTTP request.

@@ -116,6 +116,7 @@ hfdownloader [REPO] [flags]              # Same as above
 | `--revision` | `-b` | string | `main` | Branch, tag, or commit |
 | `--filters` | `-F` | strings | | Comma-separated LFS filters |
 | `--exclude` | `-E` | strings | | Patterns to exclude |
+| `--exact` | | bool | `false` | Match filters against whole name segments, not substrings (e.g. `-F q6_k` matches `Q6_K` but not `Q6_K_XL`) |
 | `--append-filter-subdir` | | bool | `false` | Create subdirs per filter |
 
 #### Performance
@@ -296,6 +297,7 @@ hfdownloader analyze <repo> [flags]
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
+| `--interactive` | `-i` | bool | `false` | Launch interactive TUI to pick files/quantizations to download |
 | `--endpoint` | | string | | Custom HF endpoint |
 | `--format` | | string | `text` | Output: text, json |
 
@@ -845,7 +847,7 @@ hfdownloader version [flags]
 
 ```bash
 hfdownloader version
-# hfdownloader v3.1.1
+# hfdownloader v3.2.0
 # Go:      go1.21.0
 # OS/Arch: darwin/arm64
 # Commit:  abc123

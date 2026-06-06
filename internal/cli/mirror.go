@@ -622,7 +622,7 @@ func mirrorSync(srcCache, dstCache, repoFilter string, dryRun, verify, deleteExt
 			os.RemoveAll(dstPath)
 		}
 
-		if err := copyRepoCache(e.Path, srcCache, dstCache); err != nil {
+		if err := hfdownloader.CopyRepoCache(e.Path, srcCache, dstCache); err != nil {
 			return fmt.Errorf("copy %s: %w", e.Repo, err)
 		}
 
@@ -631,7 +631,7 @@ func mirrorSync(srcCache, dstCache, repoFilter string, dryRun, verify, deleteExt
 			if !quiet {
 				fmt.Printf("  Verifying...")
 			}
-			if err := verifyRepoCache(e.Path, srcCache, dstCache); err != nil {
+			if err := hfdownloader.VerifyRepoCache(e.Path, srcCache, dstCache); err != nil {
 				return fmt.Errorf("verify %s: %w", e.Repo, err)
 			}
 			if !quiet {
@@ -665,108 +665,9 @@ func mirrorSync(srcCache, dstCache, repoFilter string, dryRun, verify, deleteExt
 	return nil
 }
 
-// copyRepoCache copies a repo from source to destination cache.
-func copyRepoCache(repoPath, srcCache, dstCache string) error {
-	// Get relative path from source cache
-	relPath, err := filepath.Rel(srcCache, repoPath)
-	if err != nil {
-		return err
-	}
-
-	dstPath := filepath.Join(dstCache, relPath)
-
-	// Create destination directory
-	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
-		return err
-	}
-
-	// Use cp -r for simplicity (cross-platform would need more work)
-	// For now, walk and copy
-	return filepath.Walk(repoPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		rel, err := filepath.Rel(repoPath, path)
-		if err != nil {
-			return err
-		}
-
-		dst := filepath.Join(dstPath, rel)
-
-		if info.IsDir() {
-			return os.MkdirAll(dst, info.Mode())
-		}
-
-		// Check if it's a symlink
-		if info.Mode()&os.ModeSymlink != 0 {
-			link, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			// Remove existing symlink if exists
-			os.Remove(dst)
-			return os.Symlink(link, dst)
-		}
-
-		// Copy file
-		return copyFile(path, dst)
-	})
-}
-
-// copyFile copies a single file.
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-
-	info, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(dst, data, info.Mode())
-}
-
-// verifyRepoCache verifies that a copied repo matches the source.
-// It compares blob file sizes (blob filenames are SHA256, so same name = same content).
-func verifyRepoCache(repoPath, srcCache, dstCache string) error {
-	relPath, err := filepath.Rel(srcCache, repoPath)
-	if err != nil {
-		return err
-	}
-
-	dstPath := filepath.Join(dstCache, relPath)
-	blobsDir := filepath.Join(repoPath, "blobs")
-
-	// Walk source blobs and verify they exist in destination with same size
-	return filepath.Walk(blobsDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-
-		rel, err := filepath.Rel(repoPath, path)
-		if err != nil {
-			return err
-		}
-
-		dstFile := filepath.Join(dstPath, rel)
-		dstInfo, err := os.Stat(dstFile)
-		if err != nil {
-			return fmt.Errorf("missing blob %s: %w", rel, err)
-		}
-
-		if dstInfo.Size() != info.Size() {
-			return fmt.Errorf("size mismatch for %s: src=%d dst=%d", rel, info.Size(), dstInfo.Size())
-		}
-
-		return nil
-	})
-}
+// Repo copy/verify primitives live in pkg/hfdownloader (CopyRepoCache,
+// VerifyRepoCache, CopyFileStream, SameFileSHA256) and are shared with the
+// server mirror path.
 
 // RepoIntegrity represents the integrity status of a repo.
 type RepoIntegrity struct {

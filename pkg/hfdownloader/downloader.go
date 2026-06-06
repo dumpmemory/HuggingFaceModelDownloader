@@ -5,6 +5,7 @@ package hfdownloader
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -309,41 +310,27 @@ LOOP:
 			}
 			if dlErr != nil {
 				select {
-				case errCh <- fmt.Errorf("download %s: %w", finalRel, dlErr):
+				case errCh <- &DownloadError{Path: finalRel, Err: dlErr}:
 				default:
 				}
 				return
 			}
 
-			// Verify after download
-			if it.LFS && it.SHA256 != "" {
-				if err := verifySHA256(dst, it.SHA256); err != nil {
-					select {
-					case errCh <- fmt.Errorf("sha256 verify failed: %s: %w", finalRel, err):
-					default:
-					}
-					return
+			// Verify after download.
+			//
+			// When the plan carries an expected content SHA256 (always for LFS,
+			// which also covers every multipart download since range requests
+			// are only used for LFS; and for any other file a mirror annotates),
+			// always verify it regardless of the configured mode — a known hash
+			// is the strongest available check and catches same-size byte flips
+			// that a size check cannot. Files without a known hash fall back to
+			// the configured mode.
+			if verr := verifyDownloaded(fileCtx, httpc, cfg, itForIO, it, dst, finalRel); verr != nil {
+				select {
+				case errCh <- verr:
+				default:
 				}
-			} else if cfg.Verify == "size" && it.Size > 0 {
-				fi, err := os.Stat(dst)
-				if err != nil || fi.Size() != it.Size {
-					select {
-					case errCh <- fmt.Errorf("size mismatch for %s", finalRel):
-					default:
-					}
-					return
-				}
-			} else if cfg.Verify == "sha256" {
-				_, remoteSha, _ := headForETag(fileCtx, httpc, cfg.Token, itForIO)
-				if remoteSha != "" {
-					if err := verifySHA256(dst, remoteSha); err != nil {
-						select {
-						case errCh <- fmt.Errorf("sha256 verify failed: %s: %w", finalRel, err):
-						default:
-						}
-						return
-					}
-				}
+				return
 			}
 
 			// For HF Cache mode: move to blob and create symlinks
@@ -378,17 +365,21 @@ LOOP:
 	wg.Wait()
 	close(errCh)
 
-	// Drain errors
-	var firstErr error
+	// Drain errors. errCh is buffered to len(plan.Items) and every worker
+	// sends at most one error, so collecting them all here can't block and
+	// can't drop failures. We aggregate with errors.Join rather than reporting
+	// only the first failure, so a multi-file run surfaces every problem (and
+	// errors.Is/As still traverses each joined error).
+	var errs []error
 	for e := range errCh {
 		if e != nil {
-			firstErr = e
-			break
+			errs = append(errs, e)
 		}
 	}
-	if firstErr != nil {
-		emit(ProgressEvent{Level: "error", Event: "error", Message: firstErr.Error()})
-		return firstErr
+	if len(errs) > 0 {
+		joined := errors.Join(errs...)
+		emit(ProgressEvent{Level: "error", Event: "error", Message: joined.Error()})
+		return joined
 	}
 
 	if ctx.Err() != nil {
