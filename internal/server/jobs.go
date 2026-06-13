@@ -80,6 +80,18 @@ type JobManager struct {
 	// can race a still-in-flight mkdir inside the downloader and fail
 	// with "directory not empty".
 	runWG sync.WaitGroup
+
+	// Serial execution (github issue #85): downloads run one model at a time,
+	// mirroring the CLI. queue holds the IDs of jobs waiting to run in FIFO
+	// order; busy is true while a job is executing. Per-model parallelism
+	// (connections-per-file, files-per-model) is unaffected — only the number
+	// of simultaneous *models* is capped at one. Both fields are guarded by mu.
+	queue []string
+	busy  bool
+
+	// runFn performs a job's download. It defaults to runJob and exists so
+	// tests can substitute a fake runner without touching the network.
+	runFn func(*Job)
 }
 
 // wsBroadcastMinGap is the minimum interval between consecutive WebSocket
@@ -96,6 +108,7 @@ func NewJobManager(cfg Config, wsHub *WSHub) *JobManager {
 		config: cfg,
 		wsHub:  wsHub,
 	}
+	m.runFn = m.runJob
 	if wsHub != nil {
 		m.wsCoalescer = newJobCoalescer(wsBroadcastMinGap, func(j *Job) {
 			wsHub.BroadcastJob(j)
@@ -141,6 +154,49 @@ func (m *JobManager) Stop() {
 	if m.wsCoalescer != nil {
 		m.wsCoalescer.stop()
 	}
+}
+
+// enqueueLocked appends a job ID to the run queue. Must hold m.mu (write).
+func (m *JobManager) enqueueLocked(id string) {
+	m.queue = append(m.queue, id)
+}
+
+// scheduleNextLocked starts the next queued job if no job is currently running.
+// Downloads execute one model at a time (github issue #85) — additional jobs
+// stay in the queue with status "queued" until the active one finishes. Jobs
+// that were cancelled or deleted while waiting are skipped. Must hold m.mu
+// (write).
+func (m *JobManager) scheduleNextLocked() {
+	if m.busy {
+		return
+	}
+	for len(m.queue) > 0 {
+		id := m.queue[0]
+		m.queue = m.queue[1:]
+		job, ok := m.jobs[id]
+		if !ok || job.Status != JobStatusQueued {
+			continue // cancelled / deleted / no longer queued
+		}
+		m.busy = true
+		m.runWG.Add(1)
+		go func() {
+			// finishRun (registered last → runs first) releases the slot and
+			// starts the next job *before* runWG.Done, so the wait group never
+			// momentarily drops to zero mid-chain.
+			defer m.runWG.Done()
+			defer m.finishRun()
+			m.runFn(job)
+		}()
+		return
+	}
+}
+
+// finishRun releases the single run slot and starts the next queued job.
+func (m *JobManager) finishRun() {
+	m.mu.Lock()
+	m.busy = false
+	m.scheduleNextLocked()
+	m.mu.Unlock()
 }
 
 // cloneJobLocked returns a fully-independent copy of a Job. Must be called
@@ -231,12 +287,12 @@ func (m *JobManager) CreateJob(req DownloadRequest) (*Job, bool, error) {
 	}
 
 	m.jobs[job.ID] = job
+	// Enqueue and start it only if no other model is downloading. Extra jobs
+	// wait their turn (status stays "queued") instead of all running at once.
+	m.enqueueLocked(job.ID)
+	m.scheduleNextLocked()
 	snapshot := m.cloneJobLocked(job)
 	m.mu.Unlock()
-
-	// Start the job
-	m.runWG.Add(1)
-	go m.runJob(job)
 
 	return snapshot, false, nil
 }
@@ -340,15 +396,14 @@ func (m *JobManager) ResumeJob(id string) bool {
 	// reported in plan.
 	job.Progress = JobProgress{}
 	job.Files = nil
+	// Re-queue; already-downloaded files are skipped when it actually runs.
+	m.enqueueLocked(job.ID)
+	m.scheduleNextLocked()
 	snapshot := m.cloneJobLocked(job)
 	m.mu.Unlock()
 
 	// Notify listeners of status change
 	m.notifyListeners(snapshot)
-
-	// Restart the job - already downloaded files will be skipped by the downloader
-	m.runWG.Add(1)
-	go m.runJob(job)
 
 	return true
 }
@@ -483,10 +538,10 @@ func (m *JobManager) notifyListeners(snapshot *Job) {
 	}
 }
 
-// runJob executes the download job.
+// runJob executes the download job. It is invoked through scheduleNextLocked's
+// wrapper, which owns runWG bookkeeping and releases the run slot when runJob
+// returns (so the next queued job can start).
 func (m *JobManager) runJob(job *Job) {
-	defer m.runWG.Done()
-
 	cfg := m.snapshotConfig()
 
 	ctx, cancel := context.WithCancel(context.Background())

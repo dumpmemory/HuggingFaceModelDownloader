@@ -201,6 +201,79 @@ func TestBasicAuthMiddleware(t *testing.T) {
 	}
 }
 
+// TestJobsRunSerially verifies the fix for issue #85: regardless of how many
+// models are submitted at once, only one downloads at a time and the rest run
+// in FIFO order. It substitutes a fake runner (m.runFn) so the scheduler is
+// exercised without touching the network.
+func TestJobsRunSerially(t *testing.T) {
+	m := NewJobManager(DefaultConfig(), nil)
+
+	var mu sync.Mutex
+	cur, maxCur := 0, 0
+	var order []string
+
+	started := make(chan string, 16)
+	proceed := make(chan struct{})
+
+	m.runFn = func(j *Job) {
+		mu.Lock()
+		cur++
+		if cur > maxCur {
+			maxCur = cur
+		}
+		order = append(order, j.Repo)
+		mu.Unlock()
+
+		started <- j.Repo
+		<-proceed // hold the slot until the test lets this job finish
+
+		mu.Lock()
+		cur--
+		mu.Unlock()
+	}
+
+	const n = 5
+	for i := 0; i < n; i++ {
+		if _, _, err := m.CreateJob(DownloadRequest{Repo: "owner/r" + string(rune('0'+i))}); err != nil {
+			t.Fatalf("CreateJob: %v", err)
+		}
+	}
+
+	for i := 0; i < n; i++ {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("job %d never started — serial scheduler stalled", i)
+		}
+		// While this job holds the slot, no other job may have started.
+		select {
+		case extra := <-started:
+			t.Fatalf("a second job (%s) started concurrently — not serial", extra)
+		case <-time.After(40 * time.Millisecond):
+		}
+		proceed <- struct{}{} // finish the running job → next should start
+	}
+
+	if !m.WaitAll(2 * time.Second) {
+		t.Fatal("not all queued jobs completed")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if maxCur != 1 {
+		t.Errorf("max concurrent jobs = %d, want 1 (serial execution)", maxCur)
+	}
+	if len(order) != n {
+		t.Fatalf("ran %d jobs, want %d", len(order), n)
+	}
+	for i := 0; i < n; i++ {
+		want := "owner/r" + string(rune('0'+i))
+		if order[i] != want {
+			t.Errorf("run order[%d] = %s, want %s (FIFO)", i, order[i], want)
+		}
+	}
+}
+
 // TestHealthReportsConfiguredVersion confirms the health endpoint reports the
 // injected build version (and falls back to "dev" when unset) rather than a
 // stamp hardcoded in source.
