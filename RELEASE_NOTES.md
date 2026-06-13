@@ -1,3 +1,62 @@
+# Release Notes - v3.2.0
+
+> **Release Date:** June 2026
+> **Security, Reliability & Web-UI Hardening**
+
+## Highlights
+
+A hardening release: security and concurrency fixes for the web server, stronger
+download integrity, a streaming/verified mirror, and a Web UI that downloads one
+model at a time like the CLI.
+
+## Security & Concurrency
+
+- **WebSocket hub races fixed.** Slow-client eviction now runs under the write
+  lock (was a concurrent map write under a read lock that could panic the hub
+  and kill all live progress); the send channel is closed exactly once.
+- **WebSocket origin checks.** `CheckOrigin` now validates the `Origin` header
+  against the configured allow-list (same-origin allowed, cross-origin denied by
+  default) to stop cross-site WebSocket hijacking.
+- **Settings updates are race-free.** `POST /api/settings` takes a write lock and
+  publishes the proxy config copy-on-write, so it no longer races in-flight
+  downloads or `GET /api/settings`.
+- Constant-time basic-auth comparison; checked `crypto/rand`; the WebSocket
+  broadcast coalescer is now stopped on graceful shutdown.
+
+## Reliability
+
+- **Stronger verification.** Files are SHA256-verified whenever a content hash is
+  known (covers multipart output); `--verify etag` now actually verifies instead
+  of silently doing nothing. Per-file errors are aggregated.
+- **Path-traversal guard.** Entries from the (operator-configurable, remote)
+  repo tree that escape the repo root are rejected before any file is written.
+- **Mirror push/pull** streams blobs with `io.Copy` (no whole-file-into-RAM) and
+  `--verify` performs a real SHA256 integrity check. The shared copy/verify
+  primitives now live in `pkg/hfdownloader`.
+- Typed errors (`*APIError`/`*DownloadError`/`*VerificationError`) so
+  `errors.Is/As` works against the documented sentinels.
+
+## Web UI
+
+- **One model at a time (#85).** Adding several models via Analyze used to start
+  them all at once. Downloads now run serially (matching the CLI); extra models
+  stay `queued` until the active one finishes. The setting formerly labeled
+  "Concurrent downloads" is now **"Parallel files per model"**, which is what it
+  actually controls.
+
+## Internal / Docs
+
+- Version is sourced from the build (`/api/health`, WebSocket init, web UI footer)
+  instead of hardcoded strings.
+- Removed dead, never-called blob-coordination helpers.
+- `docs/API.md` documents the dismiss, mirror and cache rebuild/delete endpoints;
+  removed non-existent `serve --cors` / `rebuild <repo>` examples; documented
+  `analyze -i` and `download --exact`.
+
+**Full Changelog**: https://github.com/bodaay/HuggingFaceModelDownloader/compare/v3.1.1...v3.2.0
+
+---
+
 # Release Notes - v3.0.0
 
 > **Release Date:** January 2026
